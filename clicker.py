@@ -62,9 +62,30 @@ class GameMakerApp:
         style.configure("TEntry", font=("Arial", 10))
         style.configure("TCheckbutton", background="#f0f0f0", font=("Arial", 10))
 
-        # Container chính
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.pack(fill="both", expand=True)
+        # Container chính có thanh cuộn dọc
+        outer_frame = ttk.Frame(self.root)
+        outer_frame.pack(fill="both", expand=True)
+
+        self.main_canvas = tk.Canvas(outer_frame, bg="#f0f0f0", highlightthickness=0)
+        main_scrollbar = ttk.Scrollbar(outer_frame, orient="vertical", command=self.main_canvas.yview)
+        self.main_canvas.configure(yscrollcommand=main_scrollbar.set)
+        main_scrollbar.pack(side="right", fill="y")
+        self.main_canvas.pack(side="left", fill="both", expand=True)
+
+        main_frame = ttk.Frame(self.main_canvas, padding="10")
+        main_frame_window = self.main_canvas.create_window((0, 0), window=main_frame, anchor="nw")
+
+        main_frame.bind(
+            "<Configure>",
+            lambda e: self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+        )
+        # Cho main_frame rộng bằng canvas để các frame con fill="x" đúng
+        self.main_canvas.bind(
+            "<Configure>",
+            lambda e: self.main_canvas.itemconfigure(main_frame_window, width=e.width)
+        )
+        # Cuộn bằng con lăn chuột khi trỏ trong cửa sổ chính
+        self.root.bind_all("<MouseWheel>", self._on_mousewheel)
 
         # Tiêu đề
         ttk.Label(main_frame, text="Game Maker - Multi Action", font=("Arial", 16, "bold"), background="#f0f0f0").pack(pady=10)
@@ -240,6 +261,15 @@ class GameMakerApp:
 
         self.update_mouse_position()
         self.update_key_menu()
+
+    def _on_mousewheel(self, event):
+        # Để Listbox tự cuộn nội dung của nó, chỉ cuộn trang khi trỏ ngoài Listbox
+        widget = event.widget
+        if isinstance(widget, tk.Listbox):
+            return
+        if widget.winfo_toplevel() is not self.root:
+            return
+        self.main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def update_mouse_position(self):
         if not self.is_running and not self.is_selecting and not self.is_recording and not self.is_picking_trigger_color:
