@@ -405,7 +405,7 @@ class GameMakerApp:
             messagebox.showwarning("Cảnh báo", "Vui lòng dừng chương trình, chế độ chọn hoặc ghi trước!")
             return
         self.is_selecting = True
-        self.status_label.config(text="Trạng thái: Chọn tọa độ (nhấn Esc để dừng)", foreground="blue")
+        self.status_label.config(text="Trạng thái: Chọn tọa độ (nhấn F8 để dừng)", foreground="blue")
         self.preview_window = tk.Toplevel(self.root)
         self.preview_window.title("Chọn tọa độ bằng chuột - Game Maker")
         self.preview_window.attributes("-alpha", 0.8)
@@ -413,7 +413,7 @@ class GameMakerApp:
         screen_width, screen_height = pyautogui.size()
         canvas = tk.Canvas(self.preview_window, width=screen_width, height=screen_height, bg="black")
         canvas.pack()
-        canvas.create_text(10, 10, text="Nhấn chuột trái để chọn tọa độ, Esc để dừng", fill="white", anchor="nw")
+        canvas.create_text(10, 10, text="Nhấn chuột trái để chọn tọa độ, F8 để dừng", fill="white", anchor="nw")
         key = self.current_key.get()
         name = self.current_action_name.get()
         if key in self.key_actions:
@@ -424,7 +424,7 @@ class GameMakerApp:
                         x, y = coord_item["x"], coord_item["y"]
                         canvas.create_oval(x-5, y-5, x+5, y+5, fill="red")
         canvas.bind("<Button-1>", self.add_coord_click)
-        threading.Thread(target=self.check_escape_key, daemon=True).start()
+        threading.Thread(target=self.check_cancel_key, daemon=True).start()
 
     def add_coord_click(self, event):
         if self.is_selecting:
@@ -459,7 +459,7 @@ class GameMakerApp:
             messagebox.showwarning("Cảnh báo", "Vui lòng dừng chương trình, chế độ chọn hoặc ghi trước!")
             return
         self.is_recording = True
-        self.status_label.config(text="Trạng thái: Đang ghi hành vi (nhấn Esc để dừng)", foreground="purple")
+        self.status_label.config(text="Trạng thái: Đang ghi hành vi (nhấn F8 để dừng)", foreground="purple")
         self.preview_window = tk.Toplevel(self.root)
         self.preview_window.title("Ghi hành vi chuột - Game Maker")
         self.preview_window.attributes("-alpha", 0.8)
@@ -467,7 +467,7 @@ class GameMakerApp:
         screen_width, screen_height = pyautogui.size()
         canvas = tk.Canvas(self.preview_window, width=screen_width, height=screen_height, bg="black")
         canvas.pack()
-        canvas.create_text(10, 10, text="Nhấn chuột để ghi hành vi, Esc để dừng", fill="white", anchor="nw")
+        canvas.create_text(10, 10, text="Nhấn chuột để ghi hành vi, F8 để dừng", fill="white", anchor="nw")
         key = self.current_key.get()
         name = self.current_action_name.get()
         if key in self.key_actions:
@@ -481,7 +481,7 @@ class GameMakerApp:
         canvas.bind("<Button-2>", lambda e: self.record_click("middle"))
         canvas.bind("<Button-3>", lambda e: self.record_click("right"))
         self.last_click_time = time.time()
-        threading.Thread(target=self.check_escape_key, daemon=True).start()
+        threading.Thread(target=self.check_cancel_key, daemon=True).start()
 
     def record_click(self, click_type):
         if self.is_recording:
@@ -512,9 +512,9 @@ class GameMakerApp:
                 canvas.create_oval(x-5, y-5, x+5, y+5, fill="red")
             messagebox.showinfo("Thành công", f"Đã ghi tọa độ ({x}, {y}) vào hành động '{name}'!")
 
-    def check_escape_key(self):
+    def check_cancel_key(self):
         while self.is_selecting or self.is_recording or self.is_picking_trigger_color:
-            if keyboard.is_pressed("esc"):
+            if keyboard.is_pressed("f8"):
                 self.is_selecting = False
                 self.is_recording = False
                 self.is_picking_trigger_color = False
@@ -743,7 +743,7 @@ class GameMakerApp:
             return
 
         self.is_picking_trigger_color = True
-        self.status_label.config(text="Trạng thái: Chọn màu trigger (click để lấy, Esc để hủy)", foreground="blue")
+        self.status_label.config(text="Trạng thái: Chọn màu trigger (click để lấy, F8 để hủy)", foreground="blue")
 
         if self.preview_window:
             self.preview_window.destroy()
@@ -758,13 +758,13 @@ class GameMakerApp:
         canvas.create_text(
             10,
             10,
-            text="Di chuyển chuột đến điểm màu cần lấy, click chuột trái để chọn (Esc để hủy)",
+            text="Di chuyển chuột đến điểm màu cần lấy, click chuột trái để chọn (F8 để hủy)",
             fill="white",
             anchor="nw",
         )
         canvas.bind("<Button-1>", self.pick_trigger_color_click)
 
-        threading.Thread(target=self.check_escape_key, daemon=True).start()
+        threading.Thread(target=self.check_cancel_key, daemon=True).start()
 
     def pick_trigger_color_click(self, event):
         if not self.is_picking_trigger_color:
