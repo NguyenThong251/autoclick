@@ -23,6 +23,7 @@ class GameMakerApp:
         self.is_selecting = False
         self.is_recording = False
         self.is_picking_trigger_color = False
+        self.is_quitting = False
         self.preview_window = None
         self.pending_color_coord_index = None
         self.thread = None
@@ -272,6 +273,8 @@ class GameMakerApp:
         self.main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def update_mouse_position(self):
+        if self.is_quitting:
+            return
         if not self.is_running and not self.is_selecting and not self.is_recording and not self.is_picking_trigger_color:
             x, y = pyautogui.position()
             self.mouse_pos_label.config(text=f"Tọa độ chuột: ({x}, {y})")
@@ -717,7 +720,36 @@ class GameMakerApp:
         if key.name in self.key_actions:
             self.current_active_key = key.name
         elif key.name == self.stop_key_var.get():
-            self.stop_clicking()
+            self.quit_app()
+
+    def quit_app(self):
+        """Phím dừng: tắt hẳn chương trình, không hiện lại cửa sổ."""
+        if self.is_quitting:
+            return
+        self.is_quitting = True
+        self.is_running = False
+        self.is_selecting = False
+        self.is_recording = False
+        self.is_picking_trigger_color = False
+        self.current_active_key = None
+        # Hàm này chạy trên thread của keyboard, phải đẩy việc đóng UI về main thread
+        self.root.after(0, self._shutdown)
+
+    def _shutdown(self):
+        try:
+            keyboard.unhook_all()
+        except Exception:
+            pass
+        if self.preview_window:
+            try:
+                self.preview_window.destroy()
+            except Exception:
+                pass
+            self.preview_window = None
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
     def set_trigger_from_mouse(self):
         x, y = pyautogui.position()
@@ -900,6 +932,10 @@ class GameMakerApp:
                 self.stop_clicking()
                 messagebox.showerror("Lỗi", f"Lỗi xảy ra: {e}")
                 break
+
+        # Đang thoát hẳn thì bỏ qua phần dọn dẹp UI, _shutdown lo phần còn lại
+        if self.is_quitting:
+            return
 
         # Hủy đăng ký sự kiện phím
         for key in self.key_actions:
