@@ -1,3 +1,31 @@
+import ctypes as _ctypes
+
+# Khai báo DPI mức per-monitor NGAY TRƯỚC mọi import khác. Dòng này bắt buộc
+# phải đứng ở đây: khi tkinter hoặc pyautogui nạp xong thì Windows đã chốt mức
+# DPI của tiến trình và không đổi được nữa.
+#
+# Không có nó, trên máy nhiều màn hình đặt scaling khác nhau Windows dùng những
+# hệ tọa độ lệch nhau cho cùng một điểm: chỗ đặt cửa sổ, chỗ con trỏ chuột và
+# chỗ đọc màu ra ba con số khác nhau. Hậu quả là tọa độ chọn trên màn phụ bị
+# trượt. Khai báo per-monitor gộp tất cả về một hệ duy nhất.
+def _khai_bao_dpi_per_monitor():
+    PER_MONITOR_AWARE_V2 = _ctypes.c_void_p(-4)
+    try:
+        _ctypes.windll.user32.SetProcessDpiAwarenessContext.argtypes = [_ctypes.c_void_p]
+        _ctypes.windll.user32.SetProcessDpiAwarenessContext.restype = _ctypes.c_int
+        if _ctypes.windll.user32.SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2):
+            return True
+    except Exception:
+        pass
+    # Máy cũ không có hàm trên thì thử API đời trước
+    try:
+        return _ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0
+    except Exception:
+        return False
+
+
+DPI_PER_MONITOR = _khai_bao_dpi_per_monitor()
+
 import pyautogui
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -9,6 +37,12 @@ import json
 import os
 from datetime import datetime
 
+import screens
+import settings
+
+# Giá trị của ô "Mở app tại" khi muốn app nhớ chỗ cũ thay vì gắn vào một màn
+NHO_VI_TRI_CU = "Nhớ vị trí lần trước"
+
 # Cấu hình PyAutoGUI
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.05
@@ -19,11 +53,14 @@ class GameMakerApp:
         self.root.title("Game Maker - Multi Action")
         self.root.geometry("900x750")
         self.root.configure(bg="#f0f0f0")
+        self.settings = settings.load()
         self.is_running = False
         self.is_selecting = False
         self.is_recording = False
         self.is_picking_trigger_color = False
         self.is_quitting = False
+        self._mouse_after_id = None
+        self.screens = screens.ScreenLayout()
         self.preview_window = None
         self.pending_color_coord_index = None
         self.thread = None
@@ -44,6 +81,8 @@ class GameMakerApp:
         self.click_type_var = tk.StringVar(value="left")
         self.new_key_var = tk.StringVar(value="1")
         self.new_action_name_var = tk.StringVar(value="Action 1")
+        self.new_monitor_var = tk.StringVar(value="Tự động")
+        self.startup_monitor_var = tk.StringVar(value=NHO_VI_TRI_CU)
         self.color_trigger_enabled_var = tk.BooleanVar(value=False)
         self.trigger_x_var = tk.IntVar(value=0)
         self.trigger_y_var = tk.IntVar(value=0)
@@ -105,6 +144,12 @@ class GameMakerApp:
 
         ttk.Label(config_frame, text="Phím dừng chương trình:").grid(row=3, column=0, sticky="w", pady=2)
         ttk.Entry(config_frame, textvariable=self.stop_key_var, width=5).grid(row=3, column=1, sticky="w", pady=2)
+
+        ttk.Label(config_frame, text="Mở app tại:").grid(row=4, column=0, sticky="w", pady=2)
+        self.startup_monitor_menu = ttk.OptionMenu(
+            config_frame, self.startup_monitor_var, NHO_VI_TRI_CU
+        )
+        self.startup_monitor_menu.grid(row=4, column=1, sticky="w", pady=2)
 
         # Frame trigger theo màu
         color_frame = ttk.LabelFrame(main_frame, text="Color Trigger", padding="10")
@@ -236,6 +281,15 @@ class GameMakerApp:
         ttk.Button(new_coord_frame, text="Chọn bằng chuột", command=self.start_mouse_selection).grid(row=1, column=4, padx=10, pady=5)
         ttk.Button(new_coord_frame, text="Ghi hành động", command=self.start_recording).grid(row=1, column=5, padx=10, pady=5)
 
+        ttk.Label(new_coord_frame, text="Màn hình:").grid(row=2, column=0, padx=10, pady=5)
+        self.monitor_menu = ttk.OptionMenu(new_coord_frame, self.new_monitor_var, "Tự động")
+        self.monitor_menu.grid(row=2, column=1, columnspan=2, sticky="w", pady=5)
+        ttk.Button(
+            new_coord_frame,
+            text="Nhận diện lại màn hình",
+            command=self.rescan_screens_announce,
+        ).grid(row=2, column=3, columnspan=2, padx=10, pady=5)
+
         # Frame điều khiển
         control_frame = ttk.Frame(main_frame)
         control_frame.pack(fill="x", pady=10)
@@ -259,9 +313,17 @@ class GameMakerApp:
         self.status_label.pack(pady=2)
         self.mouse_pos_label = ttk.Label(status_frame, text="Tọa độ chuột: (0, 0)")
         self.mouse_pos_label.pack(pady=2)
+        self.monitor_status_label = ttk.Label(status_frame, text="Màn hình: đang nhận diện...")
+        self.monitor_status_label.pack(pady=2)
 
+        self.update_monitor_menu()
+        self.update_startup_menu()
         self.update_mouse_position()
         self.update_key_menu()
+        self.khoi_phuc_vi_tri_cua_so()
+        # Bấm nút X cũng phải lưu lại vị trí như khi thoát bằng phím dừng
+        self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
+        self.root.after(300, self.canh_bao_dpi_neu_can)
 
     def _on_mousewheel(self, event):
         # Để Listbox tự cuộn nội dung của nó, chỉ cuộn trang khi trỏ ngoài Listbox
@@ -275,12 +337,13 @@ class GameMakerApp:
     def update_mouse_position(self):
         if self.is_quitting:
             return
+        self._mouse_after_id = None
         if not self.is_running and not self.is_selecting and not self.is_recording and not self.is_picking_trigger_color:
             x, y = pyautogui.position()
             self.mouse_pos_label.config(text=f"Tọa độ chuột: ({x}, {y})")
             self.new_x_var.set(x)
             self.new_y_var.set(y)
-        self.root.after(100, self.update_mouse_position)
+        self._mouse_after_id = self.root.after(100, self.update_mouse_position)
 
     def add_key(self):
         key = self.new_key_var.get().strip()
@@ -367,11 +430,17 @@ class GameMakerApp:
                         coord_item = self.normalize_coord(coord)
                         trigger_count = len(coord_item["trigger_colors"])
                         trigger_text = f"{trigger_count} màu trigger" if trigger_count else "No trigger"
+                        tag = self.monitor_tag(coord_item)
                         self.coord_listbox.insert(
                             tk.END,
-                            f"X: {coord_item['x']}, Y: {coord_item['y']}, Delay: {coord_item['delay']:.2f}s, Click: {coord_item['click_type']}, Trigger: {trigger_text}"
+                            f"[{tag}] X: {coord_item['x']}, Y: {coord_item['y']}, Delay: {coord_item['delay']:.2f}s, Click: {coord_item['click_type']}, Trigger: {trigger_text}"
                         )
+                        if coord_item.get("missing_monitor"):
+                            self.coord_listbox.itemconfig(
+                                tk.END, foreground="white", background="#c0392b"
+                            )
         self.refresh_coord_color_listbox()
+        self.refresh_monitor_status()
 
     def add_coordinate(self):
         x = self.new_x_var.get()
@@ -380,6 +449,18 @@ class GameMakerApp:
         click_type = self.click_type_var.get()
         if delay < 0:
             messagebox.showerror("Lỗi", "Delay không thể âm!")
+            return
+        # Chọn màn cụ thể thì X, Y hiểu là tọa độ TƯƠNG ĐỐI trong màn đó.
+        # Để "Tự động" thì X, Y là tọa độ tuyệt đối và app tự suy ra màn.
+        mon = self.chosen_monitor()
+        if mon is not None:
+            x, y = mon.to_absolute(x, y)
+        elif self.screens.monitor_at(x, y) is None:
+            messagebox.showerror(
+                "Lỗi",
+                f"Tọa độ ({x}, {y}) không nằm trên màn hình nào.\n"
+                "Chọn đúng màn ở ô 'Màn hình' rồi nhập lại tọa độ tương đối.",
+            )
             return
         key = self.current_key.get()
         name = self.current_action_name.get()
@@ -409,23 +490,14 @@ class GameMakerApp:
             return
         self.is_selecting = True
         self.status_label.config(text="Trạng thái: Chọn tọa độ (nhấn F8 để dừng)", foreground="blue")
-        self.preview_window = tk.Toplevel(self.root)
-        self.preview_window.title("Chọn tọa độ bằng chuột - Game Maker")
-        self.preview_window.attributes("-alpha", 0.8)
-        self.preview_window.attributes("-topmost", True)
-        screen_width, screen_height = pyautogui.size()
-        canvas = tk.Canvas(self.preview_window, width=screen_width, height=screen_height, bg="black")
-        canvas.pack()
-        canvas.create_text(10, 10, text="Nhấn chuột trái để chọn tọa độ, F8 để dừng", fill="white", anchor="nw")
-        key = self.current_key.get()
-        name = self.current_action_name.get()
-        if key in self.key_actions:
-            for action in self.key_actions[key]:
-                if action["name"] == name:
-                    for coord in action["coords"]:
-                        coord_item = self.normalize_coord(coord)
-                        x, y = coord_item["x"], coord_item["y"]
-                        canvas.create_oval(x-5, y-5, x+5, y+5, fill="red")
+        self.preview_window, canvas, offset = self.make_overlay(alpha=0.8)
+        self.label_monitors(canvas, offset)
+        canvas.create_text(
+            10, 10,
+            text="Nhấn chuột trái để chọn tọa độ (mọi màn hình), F8 để dừng",
+            fill="white", anchor="nw", font=("Arial", 14),
+        )
+        self.draw_existing_coords(canvas, offset)
         canvas.bind("<Button-1>", self.add_coord_click)
         threading.Thread(target=self.check_cancel_key, daemon=True).start()
 
@@ -463,23 +535,14 @@ class GameMakerApp:
             return
         self.is_recording = True
         self.status_label.config(text="Trạng thái: Đang ghi hành vi (nhấn F8 để dừng)", foreground="purple")
-        self.preview_window = tk.Toplevel(self.root)
-        self.preview_window.title("Ghi hành vi chuột - Game Maker")
-        self.preview_window.attributes("-alpha", 0.8)
-        self.preview_window.attributes("-topmost", True)
-        screen_width, screen_height = pyautogui.size()
-        canvas = tk.Canvas(self.preview_window, width=screen_width, height=screen_height, bg="black")
-        canvas.pack()
-        canvas.create_text(10, 10, text="Nhấn chuột để ghi hành vi, F8 để dừng", fill="white", anchor="nw")
-        key = self.current_key.get()
-        name = self.current_action_name.get()
-        if key in self.key_actions:
-            for action in self.key_actions[key]:
-                if action["name"] == name:
-                    for coord in action["coords"]:
-                        coord_item = self.normalize_coord(coord)
-                        x, y = coord_item["x"], coord_item["y"]
-                        canvas.create_oval(x-5, y-5, x+5, y+5, fill="red")
+        self.preview_window, canvas, offset = self.make_overlay(alpha=0.8)
+        self.label_monitors(canvas, offset)
+        canvas.create_text(
+            10, 10,
+            text="Nhấn chuột để ghi hành vi (mọi màn hình), F8 để dừng",
+            fill="white", anchor="nw", font=("Arial", 14),
+        )
+        self.draw_existing_coords(canvas, offset)
         canvas.bind("<Button-1>", lambda e: self.record_click("left"))
         canvas.bind("<Button-2>", lambda e: self.record_click("middle"))
         canvas.bind("<Button-3>", lambda e: self.record_click("right"))
@@ -581,22 +644,284 @@ class GameMakerApp:
                     "b": int(old.get("b", 255)),
                     "tolerance": int(old.get("tolerance", 10)),
                 })
-            return {
+            item = {
                 "x": int(coord.get("x", 0)),
                 "y": int(coord.get("y", 0)),
                 "delay": float(coord.get("delay", 0.1)),
                 "click_type": coord.get("click_type", "left"),
                 "trigger_colors": trigger_colors,
+                "monitor": coord.get("monitor"),
+                "rel_x": coord.get("rel_x"),
+                "rel_y": coord.get("rel_y"),
             }
+            return self.attach_monitor(item)
         if isinstance(coord, (list, tuple)) and len(coord) >= 4:
-            return {
+            return self.attach_monitor({
                 "x": int(coord[0]),
                 "y": int(coord[1]),
                 "delay": float(coord[2]),
                 "click_type": coord[3],
                 "trigger_colors": [],
-            }
-        return {"x": 0, "y": 0, "delay": 0.1, "click_type": "left", "trigger_colors": []}
+                "monitor": None,
+                "rel_x": None,
+                "rel_y": None,
+            })
+        return self.attach_monitor({
+            "x": 0, "y": 0, "delay": 0.1, "click_type": "left",
+            "trigger_colors": [], "monitor": None, "rel_x": None, "rel_y": None,
+        })
+
+    def attach_monitor(self, item):
+        """Gắn thông tin màn hình cho một tọa độ.
+
+        Cấu hình cũ không có trường monitor thì suy ra từ tọa độ tuyệt đối.
+        Cấu hình mới có monitor thì tính lại tọa độ tuyệt đối từ vị trí tương
+        đối, để cấu hình vẫn đúng khi màn hình đổi vị trí trong bố cục.
+        """
+        sig = item.get("monitor")
+        if sig and item.get("rel_x") is not None and item.get("rel_y") is not None:
+            mon = self.screens.match_signature(sig)
+            if mon is None:
+                # Màn đã lưu giờ không còn -> đánh dấu hỏng, giữ nguyên tọa độ cũ
+                item["missing_monitor"] = True
+                return item
+            item["x"], item["y"] = mon.to_absolute(int(item["rel_x"]), int(item["rel_y"]))
+            item["monitor"] = mon.signature()
+            item["missing_monitor"] = False
+            return item
+
+        found = self.screens.to_relative(item["x"], item["y"])
+        if found is None:
+            item["monitor"] = None
+            item["rel_x"] = None
+            item["rel_y"] = None
+            item["missing_monitor"] = True
+            return item
+        mon, rel_x, rel_y = found
+        item["monitor"] = mon.signature()
+        item["rel_x"] = rel_x
+        item["rel_y"] = rel_y
+        item["missing_monitor"] = False
+        return item
+
+    def monitor_tag(self, coord_item):
+        if coord_item.get("missing_monitor"):
+            return "THIẾU MÀN"
+        sig = coord_item.get("monitor") or {}
+        return "M%s" % sig.get("index", "?")
+
+    def make_overlay(self, alpha=0.8):
+        """Dựng lớp phủ trải kín MỌI màn hình.
+
+        Trước đây lớp phủ dựng theo pyautogui.size(), mà hàm đó chỉ biết màn
+        chính, nên không thể chọn tọa độ trên màn thứ hai.
+
+        Trả về (cửa sổ, canvas, offset). Canvas có hệ tọa độ riêng bắt đầu từ 0,
+        nên muốn vẽ tại điểm (x, y) của hệ app thì phải trừ đi offset.
+        """
+        vx, vy, vw, vh = self.screens.virtual_bounds()
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.attributes("-alpha", alpha)
+        win.geometry("%dx%d+%d+%d" % (vw, vh, vx, vy))
+        canvas = tk.Canvas(win, width=vw, height=vh, bg="black", highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+        return win, canvas, (vx, vy)
+
+    def draw_existing_coords(self, canvas, offset):
+        """Chấm đỏ các tọa độ đã có của hành động đang chọn."""
+        off_x, off_y = offset
+        key = self.current_key.get()
+        name = self.current_action_name.get()
+        for action in self.key_actions.get(key, []):
+            if action["name"] != name:
+                continue
+            for coord in action["coords"]:
+                item = self.normalize_coord(coord)
+                cx, cy = item["x"] - off_x, item["y"] - off_y
+                canvas.create_oval(cx - 5, cy - 5, cx + 5, cy + 5, fill="red")
+
+    def label_monitors(self, canvas, offset):
+        """Ghi tên từng màn lên lớp phủ để biết đang trỏ vào màn nào."""
+        off_x, off_y = offset
+        for mon in self.screens.monitors:
+            canvas.create_rectangle(
+                mon.x - off_x, mon.y - off_y,
+                mon.right - off_x - 1, mon.bottom - off_y - 1,
+                outline="#00ff88", width=3,
+            )
+            canvas.create_text(
+                mon.x - off_x + 24, mon.y - off_y + 24,
+                text=mon.describe(), fill="#00ff88", anchor="nw",
+                font=("Arial", 22, "bold"),
+            )
+
+    def update_monitor_menu(self):
+        """Đổ lại danh sách màn hình vào ô chọn."""
+        menu = self.monitor_menu["menu"]
+        menu.delete(0, "end")
+        for name in self.monitor_choices():
+            menu.add_command(label=name, command=lambda n=name: self.new_monitor_var.set(n))
+        if self.new_monitor_var.get() not in self.monitor_choices():
+            self.new_monitor_var.set("Tự động")
+
+    def monitor_choices(self):
+        return ["Tự động"] + [m.describe() for m in self.screens.monitors]
+
+    # --- vị trí cửa sổ app -----------------------------------------------
+
+    def startup_choices(self):
+        return [NHO_VI_TRI_CU] + [m.describe() for m in self.screens.monitors]
+
+    def update_startup_menu(self):
+        menu = self.startup_monitor_menu["menu"]
+        menu.delete(0, "end")
+        for name in self.startup_choices():
+            menu.add_command(
+                label=name,
+                command=lambda n=name: self.chon_man_khoi_dong(n),
+            )
+        # Khôi phục lựa chọn đã lưu, nếu màn đó vẫn còn
+        sig = self.settings.get("startup_monitor")
+        mon = self.screens.match_signature(sig) if sig else None
+        self.startup_monitor_var.set(mon.describe() if mon else NHO_VI_TRI_CU)
+
+    def chon_man_khoi_dong(self, ten):
+        """Người dùng đổi ô 'Mở app tại': lưu ngay và dời cửa sổ luôn cho thấy."""
+        self.startup_monitor_var.set(ten)
+        mon = next((m for m in self.screens.monitors if m.describe() == ten), None)
+        if mon is None:
+            self.settings = settings.update(startup_monitor=None)
+        else:
+            self.settings = settings.update(startup_monitor=mon.signature())
+            self.dat_cua_so_vao_man(mon)
+
+    def dat_cua_so_vao_man(self, mon):
+        """Đưa cửa sổ chính vào giữa màn hình chỉ định."""
+        self.root.update_idletasks()
+        w = self.root.winfo_width() or 900
+        h = self.root.winfo_height() or 750
+        # Cửa sổ to hơn màn thì thu lại cho vừa, còn hơn để tràn ra ngoài
+        w = min(w, mon.width)
+        h = min(h, mon.height)
+        x = mon.x + (mon.width - w) // 2
+        y = mon.y + (mon.height - h) // 2
+        self.root.geometry("%dx%d+%d+%d" % (w, h, x, y))
+
+    def khoi_phuc_vi_tri_cua_so(self):
+        """Đặt cửa sổ theo thiết lập đã lưu, gọi một lần lúc khởi động."""
+        sig = self.settings.get("startup_monitor")
+        if sig:
+            mon = self.screens.match_signature(sig)
+            if mon is not None:
+                self.dat_cua_so_vao_man(mon)
+                return
+            # Màn đã lưu giờ không còn -> rơi về vị trí cũ hoặc mặc định
+        vi_tri = self.settings.get("window_pos")
+        if not vi_tri:
+            return
+        try:
+            x, y, w, h = (int(vi_tri[k]) for k in ("x", "y", "w", "h"))
+        except Exception:
+            return
+        # Chỉ khôi phục nếu chỗ đó vẫn nằm trên một màn hình nào đó, tránh
+        # trường hợp rút màn ra rồi cửa sổ mở tuốt ngoài vùng nhìn thấy.
+        if self.screens.monitor_at(x + w // 2, y + h // 2) is None:
+            return
+        self.root.geometry("%dx%d+%d+%d" % (w, h, x, y))
+
+    def luu_vi_tri_cua_so(self):
+        """Ghi lại chỗ cửa sổ đang đứng, gọi lúc thoát."""
+        try:
+            # Lúc đang chạy auto thì cửa sổ bị ẩn, tọa độ đọc ra không có nghĩa
+            if self.root.state() != "normal":
+                return
+            settings.update(window_pos={
+                "x": self.root.winfo_rootx(),
+                "y": self.root.winfo_rooty(),
+                "w": self.root.winfo_width(),
+                "h": self.root.winfo_height(),
+            })
+        except Exception:
+            pass
+
+    def chosen_monitor(self):
+        """Màn hình đang chọn trong ô, None nghĩa là để app tự nhận."""
+        name = self.new_monitor_var.get()
+        for mon in self.screens.monitors:
+            if mon.describe() == name:
+                return mon
+        return None
+
+    def rescan_screens(self, announce=False):
+        """Nhận diện lại bố cục màn hình, dùng khi vừa cắm hoặc rút màn."""
+        if self.is_running or self.is_selecting or self.is_recording or self.is_picking_trigger_color:
+            return
+        self.screens.refresh()
+        self.update_monitor_menu()
+        self.update_startup_menu()
+        self.update_coord_listbox()
+        if announce:
+            chi_tiet = "\n".join(
+                "  %s tại (%d, %d)" % (m.describe(), m.x, m.y) for m in self.screens.monitors
+            )
+            if screens.dpi_ok():
+                messagebox.showinfo("Thành công", "Đã nhận diện lại màn hình:\n" + chi_tiet)
+            else:
+                messagebox.showwarning(
+                    "Cảnh báo",
+                    "Đã nhận diện lại màn hình:\n" + chi_tiet + "\n\n"
+                    "Nhưng Windows không cho khai báo DPI per-monitor cho tiến trình này. "
+                    "Trên máy nhiều màn hình đặt scaling khác nhau, tọa độ và màu trên màn "
+                    "phụ có thể lệch. Thử đặt mọi màn về cùng một mức scaling.",
+                )
+
+    def rescan_screens_announce(self):
+        self.rescan_screens(announce=True)
+
+    def missing_monitor_coords(self):
+        """Các tọa độ trỏ tới màn hình không còn tồn tại."""
+        hong = []
+        for key, actions in self.key_actions.items():
+            for action in actions:
+                for coord in action["coords"]:
+                    if self.normalize_coord(coord).get("missing_monitor"):
+                        hong.append((key, action["name"]))
+                        break
+        return hong
+
+    def refresh_monitor_status(self):
+        if not hasattr(self, "monitor_status_label"):
+            return
+        phan = ["%s tại (%d,%d)" % (m.describe(), m.x, m.y) for m in self.screens.monitors]
+        text = "Màn hình: " + "  |  ".join(phan)
+        mau = "black"
+        hong = self.missing_monitor_coords()
+        if hong:
+            text += "  —  %d hành động có tọa độ thiếu màn hình" % len(hong)
+            mau = "red"
+        elif not screens.dpi_ok():
+            text += "  —  CẢNH BÁO: không khai báo được DPI per-monitor"
+            mau = "#b8860b"
+        self.monitor_status_label.config(text=text, foreground=mau)
+
+    def canh_bao_dpi_neu_can(self):
+        """Báo ngay nếu Windows không cho khai báo DPI per-monitor.
+
+        Không khai báo được thì tọa độ trên màn phụ sẽ lệch, và đó là loại lỗi
+        âm thầm nên phải nói rõ chứ không để người dùng tự đoán.
+        """
+        self.refresh_monitor_status()
+        if len(self.screens.monitors) > 1 and not screens.dpi_ok():
+            messagebox.showwarning(
+                "Cảnh báo",
+                "Windows không cho khai báo DPI per-monitor cho tiến trình này.\n\n"
+                "Máy anh đang dùng nhiều màn hình, nên tọa độ và màu trên màn phụ "
+                "có thể bị lệch.\n\n"
+                "Cách khắc phục: đặt mọi màn hình về cùng một mức scaling trong "
+                "Windows Settings > Display > Scale.",
+            )
 
     def get_selected_coord_index(self):
         selected = self.coord_listbox.curselection()
@@ -703,18 +1028,28 @@ class GameMakerApp:
             return
         if self.preview_window:
             self.preview_window.destroy()
-        self.preview_window = tk.Toplevel(self.root)
-        self.preview_window.title(f"Xem trước vị trí click - Hành động {name} (Phím {key})")
-        self.preview_window.attributes("-alpha", 0.8)
-        self.preview_window.attributes("-topmost", True)
-        screen_width, screen_height = pyautogui.size()
-        canvas = tk.Canvas(self.preview_window, width=screen_width, height=screen_height, bg="black")
-        canvas.pack()
+        self.preview_window, canvas, offset = self.make_overlay(alpha=0.8)
+        self.label_monitors(canvas, offset)
+        off_x, off_y = offset
         for coord in coords:
             coord_item = self.normalize_coord(coord)
-            x, y = coord_item["x"], coord_item["y"]
+            x, y = coord_item["x"] - off_x, coord_item["y"] - off_y
             canvas.create_oval(x-5, y-5, x+5, y+5, fill="red")
-        canvas.create_text(10, 10, text="Đóng cửa sổ này để dừng xem trước", fill="white", anchor="nw")
+            canvas.create_text(
+                x + 10, y - 10, text=self.monitor_tag(coord_item),
+                fill="#ffd700", anchor="nw", font=("Arial", 11, "bold"),
+            )
+        canvas.create_text(
+            10, 10,
+            text=f"Xem trước: {name} (phím {key}) — click bất kỳ đâu để đóng",
+            fill="white", anchor="nw", font=("Arial", 14),
+        )
+        canvas.bind("<Button-1>", lambda e: self.close_preview())
+
+    def close_preview(self):
+        if self.preview_window:
+            self.preview_window.destroy()
+            self.preview_window = None
 
     def handle_key_press(self, key):
         if key.name in self.key_actions:
@@ -736,6 +1071,14 @@ class GameMakerApp:
         self.root.after(0, self._shutdown)
 
     def _shutdown(self):
+        self.luu_vi_tri_cua_so()
+        # Hủy callback định kỳ trước khi phá cửa sổ, không thì Tcl kêu lỗi
+        if getattr(self, "_mouse_after_id", None) is not None:
+            try:
+                self.root.after_cancel(self._mouse_after_id)
+            except Exception:
+                pass
+            self._mouse_after_id = None
         try:
             keyboard.unhook_all()
         except Exception:
@@ -761,7 +1104,7 @@ class GameMakerApp:
         try:
             x = self.trigger_x_var.get()
             y = self.trigger_y_var.get()
-            r, g, b = pyautogui.pixel(x, y)
+            r, g, b = self.screens.read_pixel(x, y)
             self.trigger_r_var.set(r)
             self.trigger_g_var.set(g)
             self.trigger_b_var.set(b)
@@ -779,20 +1122,14 @@ class GameMakerApp:
 
         if self.preview_window:
             self.preview_window.destroy()
-        self.preview_window = tk.Toplevel(self.root)
-        self.preview_window.title("Chọn màu trigger - Game Maker")
-        self.preview_window.attributes("-topmost", True)
-        self.preview_window.attributes("-alpha", 0.2)
-        self.preview_window.attributes("-fullscreen", True)
-
-        canvas = tk.Canvas(self.preview_window, bg="black", highlightthickness=0)
-        canvas.pack(fill="both", expand=True)
+        self.preview_window, canvas, _offset = self.make_overlay(alpha=0.2)
         canvas.create_text(
             10,
             10,
-            text="Di chuyển chuột đến điểm màu cần lấy, click chuột trái để chọn (F8 để hủy)",
+            text="Di chuyển chuột đến điểm màu cần lấy trên bất kỳ màn nào, click chuột trái để chọn (F8 để hủy)",
             fill="white",
             anchor="nw",
+            font=("Arial", 14),
         )
         canvas.bind("<Button-1>", self.pick_trigger_color_click)
 
@@ -815,7 +1152,7 @@ class GameMakerApp:
         time.sleep(0.05)
 
         try:
-            r, g, b = pyautogui.pixel(x, y)
+            r, g, b = self.screens.read_pixel(x, y)
             action = self.get_current_action()
             if action is not None and self.pending_color_coord_index is not None and self.pending_color_coord_index < len(action["coords"]):
                 coord = self.normalize_coord(action["coords"][self.pending_color_coord_index])
@@ -856,14 +1193,14 @@ class GameMakerApp:
             self.trigger_b_var.get(),
         )
         tolerance = max(0, min(255, self.color_tolerance_var.get()))
-        current = pyautogui.pixel(x, y)
+        current = self.screens.read_pixel(x, y)
         return all(abs(current[i] - target[i]) <= tolerance for i in range(3))
 
     def is_coord_trigger_matched(self, coord):
         coord_item = self.normalize_coord(coord)
         trigger_colors = coord_item["trigger_colors"]
         if trigger_colors:
-            current = pyautogui.pixel(coord_item["x"], coord_item["y"])
+            current = self.screens.read_pixel(coord_item["x"], coord_item["y"])
             for trigger in trigger_colors:
                 tolerance = max(0, min(255, int(trigger.get("tolerance", 10))))
                 if all(abs(current[i] - int(trigger[channel])) <= tolerance for i, channel in enumerate(("r", "g", "b"))):
@@ -908,8 +1245,8 @@ class GameMakerApp:
 
                 # Chế độ ngẫu nhiên (nếu bật)
                 if random_mode and self.is_running:
-                    screen_width, screen_height = pyautogui.size()
-                    coords = [(random.randint(0, screen_width), random.randint(0, screen_height), 0.1, "left") for _ in range(3)]
+                    vx, vy, vw, vh = self.screens.virtual_bounds()
+                    coords = [(random.randint(vx, vx + vw), random.randint(vy, vy + vh), 0.1, "left") for _ in range(3)]
                     for x, y, delay, click_type in coords:
                         if not self.is_running:
                             break
@@ -965,6 +1302,16 @@ class GameMakerApp:
                 if self.stop_key_var.get() in self.key_actions:
                     messagebox.showerror("Lỗi", f"Phím dừng '{self.stop_key_var.get()}' trùng với phím hành động!")
                     return
+                hong = self.missing_monitor_coords()
+                if hong:
+                    danh_sach = "\n".join(f"  - Phím {k}, hành động '{n}'" for k, n in hong)
+                    messagebox.showerror(
+                        "Lỗi",
+                        "Không chạy được vì có tọa độ trỏ tới màn hình không còn tồn tại:\n\n"
+                        f"{danh_sach}\n\n"
+                        "Cắm lại màn hình đó, hoặc xóa và đặt lại các tọa độ đã tô đỏ.",
+                    )
+                    return
                 self.is_running = True
                 self.thread = threading.Thread(target=self.auto_click, daemon=True)
                 self.thread.start()
@@ -1000,6 +1347,11 @@ class GameMakerApp:
                 "b": self.trigger_b_var.get(),
                 "tolerance": self.color_tolerance_var.get(),
             },
+            # Bố cục màn hình lúc lưu, để khi tải lại còn đối chiếu và báo lệch
+            "monitors": [
+                {"index": m.index, "x": m.x, "y": m.y, "w": m.width, "h": m.height}
+                for m in self.screens.monitors
+            ],
             "key_actions": {
                 key: [
                     {"name": action["name"], "coords": [self.normalize_coord(coord) for coord in action["coords"]]}
@@ -1010,14 +1362,14 @@ class GameMakerApp:
         }
         file_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
         if file_path:
-            with open(file_path, "w") as f:
-                json.dump(config, f, indent=4)
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
             messagebox.showinfo("Thành công", "Cấu hình Game Maker đã được lưu!")
 
     def load_config(self):
         file_path = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
         if file_path:
-            with open(file_path, "r") as f:
+            with open(file_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
             self.interval_var.set(config.get("interval", 1.0))
             self.click_count_var.set(config.get("click_count", 0))
@@ -1041,7 +1393,24 @@ class GameMakerApp:
             self.update_key_menu()
             self.current_key.set(list(self.key_actions.keys())[0] if self.key_actions else "1")
             self.update_action_menu()
-            messagebox.showinfo("Thành công", "Cấu hình Game Maker đã được tải!")
+
+            hong = self.missing_monitor_coords()
+            if hong:
+                da_luu = config.get("monitors") or []
+                mo_ta_cu = ", ".join(
+                    "Màn %s (%sx%s)" % (m.get("index"), m.get("w"), m.get("h")) for m in da_luu
+                ) or "(cấu hình cũ không ghi lại bố cục màn hình)"
+                mo_ta_moi = ", ".join(m.describe() for m in self.screens.monitors)
+                messagebox.showwarning(
+                    "Thiếu màn hình",
+                    "Đã tải cấu hình, nhưng có tọa độ trỏ tới màn hình không còn tồn tại.\n\n"
+                    f"Bố cục lúc lưu: {mo_ta_cu}\n"
+                    f"Bố cục hiện tại: {mo_ta_moi}\n\n"
+                    f"{len(hong)} hành động có tọa độ hỏng, đã tô đỏ trong danh sách.\n"
+                    "Nút Bắt đầu bị khóa cho tới khi sửa xong.",
+                )
+            else:
+                messagebox.showinfo("Thành công", "Cấu hình Game Maker đã được tải!")
 
 if __name__ == "__main__":
     root = tk.Tk()
