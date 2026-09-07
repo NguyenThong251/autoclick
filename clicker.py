@@ -1,3 +1,69 @@
+import os as _os
+import sys as _sys
+
+
+def _tu_chuyen_sang_pythonw():
+    """Chạy bằng python.exe thì bàn giao cho pythonw.exe rồi thoát.
+
+    python.exe luôn kéo theo một cửa sổ console đen. Trên Windows 11 không ẩn
+    được nó bằng ShowWindow: cửa sổ thật nằm ở tiến trình WindowsTerminal.exe
+    khác, GetConsoleWindow() chỉ trả về một stub vô hình. Cách duy nhất sạch là
+    chạy bằng pythonw.exe, vốn không tạo console.
+
+    Làm ở đây để anh vẫn gõ "python clicker.py" như cũ mà không thấy console.
+    """
+    if _os.environ.get("AUTOCLICK_NO_RELAUNCH"):
+        return                      # đã là tiến trình con, chạy tiếp bình thường
+    exe = _sys.executable or ""
+    if _os.path.basename(exe).lower() != "python.exe":
+        return                      # đã là pythonw.exe rồi
+    pyw = _os.path.join(_os.path.dirname(exe), "pythonw.exe")
+    if not _os.path.isfile(pyw):
+        return                      # không có pythonw thì chạy như cũ, còn hơn không chạy
+    import subprocess
+    env = dict(_os.environ, AUTOCLICK_NO_RELAUNCH="1")
+    try:
+        subprocess.Popen(
+            [pyw, _os.path.abspath(__file__)] + _sys.argv[1:],
+            creationflags=0x00000008 | 0x00000200,   # DETACHED_PROCESS | NEW_PROCESS_GROUP
+            close_fds=True, env=env,
+            cwd=_os.path.dirname(_os.path.abspath(__file__)),
+        )
+    except Exception:
+        return                      # bàn giao hỏng thì vẫn chạy được, chỉ là còn console
+    _sys.exit(0)
+
+
+_tu_chuyen_sang_pythonw()
+
+
+def _bao_loi(etype, value, tb):
+    """Hiện lỗi ra hộp thoại và ghi vào file.
+
+    Chạy bằng pythonw thì không còn console, nên lỗi sẽ biến mất không dấu vết
+    nếu không có hàm này. Bắt buộc phải đi kèm việc ẩn console.
+    """
+    import traceback
+    import ctypes
+    text = "".join(traceback.format_exception(etype, value, tb))
+    try:
+        log = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "loi.log")
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(text + "\n")
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.MessageBoxW(0, text[-1500:], "Game Maker - Lỗi", 0x10)
+    except Exception:
+        pass
+
+
+_sys.excepthook = _bao_loi
+
+import threading as _threading
+
+_threading.excepthook = lambda a: _bao_loi(a.exc_type, a.exc_value, a.exc_traceback)
+
 import ctypes as _ctypes
 
 # Khai báo DPI mức per-monitor NGAY TRƯỚC mọi import khác. Dòng này bắt buộc
@@ -43,6 +109,27 @@ import settings
 # Giá trị của ô "Mở app tại" khi muốn app nhớ chỗ cũ thay vì gắn vào một màn
 NHO_VI_TRI_CU = "Nhớ vị trí lần trước"
 
+
+def chuan_hoa_phim(raw):
+    """Đổi tên phím người dùng nhập thành tên chuẩn, hoặc None nếu không hợp lệ.
+
+    Bắt buộc phải chuẩn hóa TRƯỚC KHI LƯU. Sự kiện bàn phím luôn báo tên đã
+    chuẩn hóa ("page up"), nên nếu lưu "pgup" thì hook vẫn đăng ký được nhưng
+    tra cứu sẽ trượt và phím im lặng không làm gì — loại lỗi rất khó tìm.
+
+    Lưu ý: "pgdn", "prior", "next" KHÔNG hợp lệ trên Windows, phải viết
+    "page down" hoặc "pgdown".
+    """
+    s = (raw or "").strip()
+    if not s:
+        return None
+    try:
+        ten = keyboard.normalize_name(s)
+        keyboard.key_to_scan_codes(ten)   # ném lỗi nếu Windows không map được
+        return ten
+    except (ValueError, KeyError):
+        return None
+
 # Cấu hình PyAutoGUI
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.05
@@ -60,6 +147,32 @@ class GameMakerApp:
         self.is_picking_trigger_color = False
         self.is_quitting = False
         self._mouse_after_id = None
+
+        # --- trạng thái tạm dừng ---
+        # Dùng Event chứ không phải vòng lặp kiểm tra cờ: vòng lặp bận ngốn trọn
+        # một lõi CPU, còn Event.wait() gần như không tốn gì mà vẫn tỉnh dậy
+        # trong chưa tới một phần nghìn giây.
+        self.is_paused = False
+        self._pause_lock = threading.Lock()
+        self._resume_evt = threading.Event()
+        self._resume_evt.set()          # đặt = đang chạy, xóa = đang tạm dừng
+        self._stop_evt = threading.Event()   # đặt = phải thoát khỏi mọi giấc ngủ
+
+        # Bản sao thuần Python của tên phím. Hàm xử lý phím chạy trên thread
+        # riêng của thư viện keyboard, đọc biến Tkinter từ đó sẽ treo cứng sau
+        # khi cửa sổ bị hủy, nên phải đọc từ bản sao này.
+        self._pause_key = "page down"
+        self._stop_key = "page up"
+        self._keys_down = set()         # lọc auto-repeat khi giữ phím
+        self._kb_hook = None
+        self._cap_handle = None         # đang bắt phím cho nút "Bấm phím để gán"
+        self._cap_timer = None
+
+        # Bản chụp cấu hình cho vòng lặp auto, lấy ở main thread lúc bấm Bắt đầu
+        self._cfg_click_count = 0
+        self._cfg_random = False
+        self._cfg_trigger = None
+
         self.screens = screens.ScreenLayout()
         self.preview_window = None
         self.pending_color_coord_index = None
@@ -74,7 +187,18 @@ class GameMakerApp:
         self.interval_var = tk.DoubleVar(value=1.0)
         self.random_mode_var = tk.BooleanVar(value=False)
         self.click_count_var = tk.IntVar(value=0)
-        self.stop_key_var = tk.StringVar(value="q")
+        # Phím mặc định là Page Up / Page Down, và nhớ lại lựa chọn của lần trước
+        self.stop_key_var = tk.StringVar(
+            value=chuan_hoa_phim(self.settings.get("stop_key")) or "page up"
+        )
+        self.pause_key_var = tk.StringVar(
+            value=chuan_hoa_phim(self.settings.get("pause_key")) or "page down"
+        )
+        self._stop_key = self.stop_key_var.get()
+        self._pause_key = self.pause_key_var.get()
+        # Giữ bản sao thuần Python đồng bộ với ô nhập, để thread bàn phím dùng
+        self.stop_key_var.trace_add("write", self._dong_bo_ten_phim)
+        self.pause_key_var.trace_add("write", self._dong_bo_ten_phim)
         self.new_x_var = tk.IntVar(value=0)
         self.new_y_var = tk.IntVar(value=0)
         self.new_delay_var = tk.DoubleVar(value=0.1)
@@ -142,14 +266,27 @@ class GameMakerApp:
 
         ttk.Checkbutton(config_frame, text="Click ngẫu nhiên trên màn hình", variable=self.random_mode_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=5)
 
-        ttk.Label(config_frame, text="Phím dừng chương trình:").grid(row=3, column=0, sticky="w", pady=2)
-        ttk.Entry(config_frame, textvariable=self.stop_key_var, width=5).grid(row=3, column=1, sticky="w", pady=2)
+        ttk.Label(config_frame, text="Phím tạm dừng / chạy tiếp:").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Entry(config_frame, textvariable=self.pause_key_var, width=14).grid(row=3, column=1, sticky="w", pady=2)
+        self.nut_bat_pause = ttk.Button(
+            config_frame, text="Bấm phím để gán",
+            command=lambda: self.bat_dau_gan_phim(self.pause_key_var, self.nut_bat_pause),
+        )
+        self.nut_bat_pause.grid(row=3, column=2, sticky="w", padx=5, pady=2)
 
-        ttk.Label(config_frame, text="Mở app tại:").grid(row=4, column=0, sticky="w", pady=2)
+        ttk.Label(config_frame, text="Phím thoát hẳn chương trình:").grid(row=4, column=0, sticky="w", pady=2)
+        ttk.Entry(config_frame, textvariable=self.stop_key_var, width=14).grid(row=4, column=1, sticky="w", pady=2)
+        self.nut_bat_stop = ttk.Button(
+            config_frame, text="Bấm phím để gán",
+            command=lambda: self.bat_dau_gan_phim(self.stop_key_var, self.nut_bat_stop),
+        )
+        self.nut_bat_stop.grid(row=4, column=2, sticky="w", padx=5, pady=2)
+
+        ttk.Label(config_frame, text="Mở app tại:").grid(row=5, column=0, sticky="w", pady=2)
         self.startup_monitor_menu = ttk.OptionMenu(
             config_frame, self.startup_monitor_var, NHO_VI_TRI_CU
         )
-        self.startup_monitor_menu.grid(row=4, column=1, sticky="w", pady=2)
+        self.startup_monitor_menu.grid(row=5, column=1, sticky="w", pady=2)
 
         # Frame trigger theo màu
         color_frame = ttk.LabelFrame(main_frame, text="Color Trigger", padding="10")
@@ -321,6 +458,7 @@ class GameMakerApp:
         self.update_mouse_position()
         self.update_key_menu()
         self.khoi_phuc_vi_tri_cua_so()
+        self.dang_ky_hook_ban_phim()
         # Bấm nút X cũng phải lưu lại vị trí như khi thoát bằng phím dừng
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
         self.root.after(300, self.canh_bao_dpi_neu_can)
@@ -346,12 +484,14 @@ class GameMakerApp:
         self._mouse_after_id = self.root.after(100, self.update_mouse_position)
 
     def add_key(self):
-        key = self.new_key_var.get().strip()
-        if not key:
-            messagebox.showerror("Lỗi", "Phím không được để trống!")
-            return
-        if len(key) != 1:
-            messagebox.showerror("Lỗi", "Phím phải là một ký tự!")
+        key = chuan_hoa_phim(self.new_key_var.get())
+        if key is None:
+            messagebox.showerror(
+                "Lỗi",
+                "Tên phím không hợp lệ.\n"
+                "Ví dụ: a, 1, f5, page up, page down, home, end, insert, delete\n"
+                "(lưu ý: 'pgdn' và 'prior' không dùng được, phải viết 'page down')",
+            )
             return
         if key in self.key_actions:
             messagebox.showwarning("Cảnh báo", f"Phím '{key}' đã tồn tại!")
@@ -360,7 +500,9 @@ class GameMakerApp:
         self.update_key_menu()
         self.current_key.set(key)
         self.update_action_menu()
-        self.new_key_var.set(str(int(key) + 1 if key.isdigit() else "1"))
+        # Phím số thì gợi ý số kế tiếp, phím khác thì để nguyên cho người dùng tự đổi
+        if key.isdigit():
+            self.new_key_var.set(str(int(key) + 1))
         messagebox.showinfo("Thành công", f"Đã thêm phím '{key}'!")
 
     def delete_key(self):
@@ -1051,11 +1193,109 @@ class GameMakerApp:
             self.preview_window.destroy()
             self.preview_window = None
 
-    def handle_key_press(self, key):
-        if key.name in self.key_actions:
-            self.current_active_key = key.name
-        elif key.name == self.stop_key_var.get():
+    # --- bàn phím ---------------------------------------------------------
+
+    def _dong_bo_ten_phim(self, *_args):
+        """Chép tên phím sang bản sao thuần Python và ghi nhớ cho lần sau."""
+        self._stop_key = chuan_hoa_phim(self.stop_key_var.get()) or self.stop_key_var.get()
+        self._pause_key = chuan_hoa_phim(self.pause_key_var.get()) or self.pause_key_var.get()
+        self.settings = settings.update(
+            stop_key=self._stop_key, pause_key=self._pause_key
+        )
+
+    def dang_ky_hook_ban_phim(self):
+        """Đăng ký MỘT hook duy nhất, một lần, cho cả vòng đời app.
+
+        Trước đây hook chỉ được đăng ký bên trong auto_click nên phím thoát vô
+        tác dụng khi app chưa chạy, và còn một khoảng mù ba giây ngay sau khi
+        bấm Bắt đầu. Một hook toàn cục xóa cả hai vấn đề đó, đồng thời tránh
+        việc gỡ hook theo tên vốn rất dễ ném lỗi.
+        """
+        if self._kb_hook is not None:
+            return
+        self._kb_hook = keyboard.hook(self._on_key_event)
+
+    def _on_key_event(self, e):
+        """Chạy trên thread của thư viện keyboard.
+
+        Không được chạm vào Tkinter và không được làm gì nặng ở đây: cả thư
+        viện chỉ có một thread xử lý, nghẽn ở đây là mọi phím khác chết theo.
+        """
+        ten = e.name
+        if e.event_type == keyboard.KEY_UP:
+            self._keys_down.discard(ten)
+            return
+        if ten in self._keys_down:
+            return                      # giữ phím sinh ra hàng loạt sự kiện, bỏ qua
+        self._keys_down.add(ten)
+
+        if self._cap_handle is not None:
+            return                      # đang bắt phím để gán, không xử lý gì khác
+        if ten == self._stop_key:
             self.quit_app()
+        elif ten == self._pause_key:
+            self.toggle_pause()
+        elif self.is_running and ten in self.key_actions:
+            self.current_active_key = ten
+
+    def toggle_pause(self):
+        """Bật/tắt tạm dừng. Nhấn lần nữa chính phím đó thì chạy tiếp."""
+        if not self.is_running or self.is_quitting:
+            return
+        with self._pause_lock:
+            self.is_paused = not self.is_paused
+            if self.is_paused:
+                self._resume_evt.clear()
+            else:
+                self._resume_evt.set()
+
+    def bat_dau_gan_phim(self, bien_dich, nut):
+        """Bắt một lần nhấn phím rồi điền tên phím vào ô.
+
+        Dùng keyboard.hook vì nó trả về ngay lập tức. Tuyệt đối không dùng
+        read_key/read_event/wait: chúng chặn vĩnh viễn, không hủy được, và sẽ
+        treo cứng cả app.
+        """
+        if self._cap_handle is not None:
+            return
+        nhan_cu = nut["text"]
+        nut.config(text="Đang chờ... (Esc để hủy)")
+
+        def ap_dung(ten):
+            self.ket_thuc_gan_phim()
+            nut.config(text=nhan_cu)
+            if ten:
+                bien_dich.set(ten)
+
+        def on_event(e):
+            if e.event_type != keyboard.KEY_DOWN:
+                return
+            if self._cap_handle is None:
+                return
+            raw = e.name or ""
+            ten = None if raw == "esc" else chuan_hoa_phim(raw)
+            # Callback chạy trên thread khác, phải đẩy về main thread mới đụng UI
+            self.root.after(0, lambda: ap_dung(ten))
+
+        self._cap_handle = keyboard.hook(on_event)
+        # Hết giờ mà không bấm gì thì tự hủy, không để nút kẹt mãi
+        self._cap_timer = self.root.after(8000, lambda: ap_dung(None))
+
+    def ket_thuc_gan_phim(self):
+        h = self._cap_handle
+        self._cap_handle = None
+        if h is not None:
+            try:
+                keyboard.unhook(h)
+            except (KeyError, ValueError):
+                pass
+        t = self._cap_timer
+        self._cap_timer = None
+        if t is not None:
+            try:
+                self.root.after_cancel(t)
+            except Exception:
+                pass
 
     def quit_app(self):
         """Phím dừng: tắt hẳn chương trình, không hiện lại cửa sổ."""
@@ -1063,6 +1303,10 @@ class GameMakerApp:
             return
         self.is_quitting = True
         self.is_running = False
+        # Đánh thức vòng lặp auto để nó thoát ngay, kể cả khi đang tạm dừng
+        self._stop_evt.set()
+        self._resume_evt.set()
+        self.is_paused = False
         self.is_selecting = False
         self.is_recording = False
         self.is_picking_trigger_color = False
@@ -1183,17 +1427,26 @@ class GameMakerApp:
             self.status_label.config(text="Trạng thái: Đang dừng", foreground="red")
 
     def is_trigger_color_matched(self):
-        if not self.color_trigger_enabled_var.get():
+        # Đang chạy thì dùng bản chụp, vì hàm này được gọi từ thread của vòng
+        # lặp auto và đọc biến Tkinter từ đó sẽ treo cứng.
+        cfg = self._cfg_trigger if self.is_running else None
+        if cfg is None:
+            cfg = {
+                "enabled": self.color_trigger_enabled_var.get(),
+                "x": self.trigger_x_var.get(),
+                "y": self.trigger_y_var.get(),
+                "rgb": (
+                    self.trigger_r_var.get(),
+                    self.trigger_g_var.get(),
+                    self.trigger_b_var.get(),
+                ),
+                "tolerance": max(0, min(255, self.color_tolerance_var.get())),
+            }
+        if not cfg["enabled"]:
             return True
-        x = self.trigger_x_var.get()
-        y = self.trigger_y_var.get()
-        target = (
-            self.trigger_r_var.get(),
-            self.trigger_g_var.get(),
-            self.trigger_b_var.get(),
-        )
-        tolerance = max(0, min(255, self.color_tolerance_var.get()))
-        current = self.screens.read_pixel(x, y)
+        target = cfg["rgb"]
+        tolerance = cfg["tolerance"]
+        current = self.screens.read_pixel(cfg["x"], cfg["y"])
         return all(abs(current[i] - target[i]) <= tolerance for i in range(3))
 
     def is_coord_trigger_matched(self, coord):
@@ -1209,23 +1462,23 @@ class GameMakerApp:
         return self.is_trigger_color_matched()
 
     def auto_click(self):
-        interval = self.interval_var.get()
-        click_count = self.click_count_var.get()
-        random_mode = self.random_mode_var.get()
-        stop_key = self.stop_key_var.get()
+        # Đọc từ bản chụp, KHÔNG đọc biến Tkinter ở đây: hàm này chạy trên
+        # thread riêng, mà đọc Tkinter từ thread khác sẽ treo cứng vĩnh viễn.
+        click_count = self._cfg_click_count
+        random_mode = self._cfg_random
 
-        self.root.withdraw()
-        self.status_label.config(text="Trạng thái: Đang chạy", foreground="green")
-        time.sleep(3)
+        self._ui(self.root.withdraw)
+        self._ui(lambda: self.status_label.config(text="Trạng thái: Đang chạy", foreground="green"))
+        self._ngu(3)
 
-        # Đăng ký sự kiện nhấn phím
-        for key in self.key_actions:
-            keyboard.on_press_key(key, self.handle_key_press)
-        keyboard.on_press_key(stop_key, self.handle_key_press)
+        # Hook bàn phím đã đăng ký sẵn từ lúc khởi động, không cần làm gì ở đây
 
         count = 0
         while self.is_running:
             try:
+                # Chốt 1: chỗ duy nhất được phép ngủ dài khi tạm dừng
+                if not self._cho_tiep_tuc():
+                    break
                 # Thực hiện hành động của phím đang active
                 if self.current_active_key and self.current_active_key in self.key_actions:
                     for action in self.key_actions[self.current_active_key]:
@@ -1235,51 +1488,87 @@ class GameMakerApp:
                             y = coord_item["y"]
                             delay = coord_item["delay"]
                             click_type = coord_item["click_type"]
-                            if not self.is_running or self.current_active_key != self.current_active_key:
+                            # Chốt 2: phải đứng TRƯỚC lệnh đọc màu, vì đọc màu
+                            # tốn hàng chục mili giây nên một hành động dài vẫn
+                            # click thêm cả chục phát sau khi đã bấm tạm dừng
+                            if not self.is_running or not self._resume_evt.is_set():
                                 break
                             if self.is_coord_trigger_matched(coord_item):
                                 pyautogui.click(x, y, button=click_type)
-                            time.sleep(delay)
-                        if not self.is_running or self.current_active_key != self.current_active_key:
+                            self._ngu(delay)
+                        # Chốt 3: giữa hai hành động
+                        if not self.is_running or not self._resume_evt.is_set():
                             break
 
                 # Chế độ ngẫu nhiên (nếu bật)
-                if random_mode and self.is_running:
+                # Chốt 4: chế độ ngẫu nhiên cũng phải dừng khi tạm dừng
+                if random_mode and self.is_running and self._resume_evt.is_set():
                     vx, vy, vw, vh = self.screens.virtual_bounds()
                     coords = [(random.randint(vx, vx + vw), random.randint(vy, vy + vh), 0.1, "left") for _ in range(3)]
                     for x, y, delay, click_type in coords:
-                        if not self.is_running:
+                        # Chốt 5
+                        if not self.is_running or not self._resume_evt.is_set():
                             break
                         if self.is_trigger_color_matched():
                             pyautogui.click(x, y, button=click_type)
-                        time.sleep(delay)
+                        self._ngu(delay)
 
                 count += 1
                 if click_count != 0 and count >= click_count:
                     self.stop_clicking()
                     break
 
-                time.sleep(0.01)  # Độ trễ nhỏ để tăng độ nhạy phím
+                # Giữ nguyên 0.01s như cũ. Ô "Khoảng thời gian giữa các chu kỳ"
+                # vẫn chưa có tác dụng — đó là lỗi có sẵn, chưa sửa ở lần này
+                # vì sửa sẽ đổi hẳn nhịp chạy của các cấu hình đang dùng.
+                self._ngu(0.01)
 
             except pyautogui.FailSafeException:
                 self.stop_clicking()
-                messagebox.showwarning("Cảnh báo", "Game Maker dừng do chuột di chuyển vào góc trên trái (failsafe).")
+                self._ui(lambda: messagebox.showwarning(
+                    "Cảnh báo", "Game Maker dừng do chuột di chuyển vào góc trên trái (failsafe)."))
                 break
             except Exception as e:
                 self.stop_clicking()
-                messagebox.showerror("Lỗi", f"Lỗi xảy ra: {e}")
+                loi = str(e)
+                self._ui(lambda: messagebox.showerror("Lỗi", f"Lỗi xảy ra: {loi}"))
                 break
 
         # Đang thoát hẳn thì bỏ qua phần dọn dẹp UI, _shutdown lo phần còn lại
         if self.is_quitting:
             return
 
-        # Hủy đăng ký sự kiện phím
-        for key in self.key_actions:
-            keyboard.unhook_key(key)
-        keyboard.unhook_key(stop_key)
-        self.root.deiconify()
-        self.status_label.config(text="Trạng thái: Đã dừng", foreground="red")
+        # Hook bàn phím là hook toàn cục, giữ nguyên cho lần chạy sau.
+        # Trước đây chỗ này gỡ hook theo tên và rất dễ ném lỗi, làm cửa sổ
+        # không bao giờ hiện lại.
+        self._ui(self.root.deiconify)
+        self._ui(lambda: self.status_label.config(text="Trạng thái: Đã dừng", foreground="red"))
+
+    def _ui(self, fn):
+        """Chạy một việc động tới giao diện, luôn trên main thread.
+
+        Vòng lặp auto chạy ở thread riêng. Gọi thẳng Tkinter từ đó sẽ treo cứng
+        vĩnh viễn sau khi cửa sổ bị hủy, nên mọi thay đổi giao diện phải đi qua
+        đây.
+        """
+        if self.is_quitting:
+            return
+        try:
+            self.root.after(0, fn)
+        except Exception:
+            pass
+
+    def _cho_tiep_tuc(self):
+        """Đứng chờ tại đây khi đang tạm dừng. False nghĩa là phải thoát vòng lặp."""
+        while not self._resume_evt.is_set():
+            if not self.is_running or self.is_quitting:
+                return False
+            self._resume_evt.wait(0.2)
+        return self.is_running and not self.is_quitting
+
+    def _ngu(self, giay):
+        """Thay cho time.sleep: tỉnh dậy ngay khi bấm Dừng hoặc Thoát."""
+        return not self._stop_evt.wait(giay)
 
     def start_clicking(self):
         if not self.is_running and not self.is_selecting and not self.is_recording and not self.is_picking_trigger_color:
@@ -1290,9 +1579,27 @@ class GameMakerApp:
                 if self.click_count_var.get() < 0:
                     messagebox.showerror("Lỗi", "Số chu kỳ click không thể âm!")
                     return
-                if len(self.stop_key_var.get()) != 1:
-                    messagebox.showerror("Lỗi", "Phím dừng phải là một ký tự!")
+                phim_thoat = chuan_hoa_phim(self.stop_key_var.get())
+                if phim_thoat is None:
+                    messagebox.showerror(
+                        "Lỗi",
+                        "Phím thoát không hợp lệ.\n"
+                        "Ví dụ: page up, page down, f5, home, end, insert, delete, a, 1\n"
+                        "(lưu ý: 'pgdn' và 'prior' không dùng được, phải viết 'page down')",
+                    )
                     return
+                phim_dung = chuan_hoa_phim(self.pause_key_var.get())
+                if phim_dung is None:
+                    messagebox.showerror("Lỗi", "Phím tạm dừng không hợp lệ.")
+                    return
+                if phim_dung == phim_thoat:
+                    messagebox.showerror("Lỗi", "Phím tạm dừng và phím thoát không được trùng nhau!")
+                    return
+                if phim_dung in self.key_actions:
+                    messagebox.showerror("Lỗi", f"Phím tạm dừng '{phim_dung}' trùng với phím hành động!")
+                    return
+                self.stop_key_var.set(phim_thoat)
+                self.pause_key_var.set(phim_dung)
                 if self.color_tolerance_var.get() < 0:
                     messagebox.showerror("Lỗi", "Tolerance màu không thể âm!")
                     return
@@ -1312,7 +1619,25 @@ class GameMakerApp:
                         "Cắm lại màn hình đó, hoặc xóa và đặt lại các tọa độ đã tô đỏ.",
                     )
                     return
+                # Chụp lại cấu hình ngay tại đây, trên main thread. Vòng lặp
+                # auto chạy ở thread riêng và không được phép đọc Tkinter.
+                self._cfg_click_count = self.click_count_var.get()
+                self._cfg_random = self.random_mode_var.get()
+                self._cfg_trigger = {
+                    "enabled": self.color_trigger_enabled_var.get(),
+                    "x": self.trigger_x_var.get(),
+                    "y": self.trigger_y_var.get(),
+                    "rgb": (
+                        self.trigger_r_var.get(),
+                        self.trigger_g_var.get(),
+                        self.trigger_b_var.get(),
+                    ),
+                    "tolerance": max(0, min(255, self.color_tolerance_var.get())),
+                }
                 self.is_running = True
+                self.is_paused = False
+                self._resume_evt.set()
+                self._stop_evt.clear()
                 self.thread = threading.Thread(target=self.auto_click, daemon=True)
                 self.thread.start()
             except Exception as e:
@@ -1322,15 +1647,25 @@ class GameMakerApp:
 
     def stop_clicking(self):
         self.is_running = False
+        # Đánh thức mọi giấc ngủ và mọi chỗ đang chờ tạm dừng
+        self._stop_evt.set()
+        self._resume_evt.set()
+        self.is_paused = False
         self.is_selecting = False
         self.is_recording = False
         self.is_picking_trigger_color = False
         self.current_active_key = None
-        if self.preview_window:
-            self.preview_window.destroy()
-            self.preview_window = None
-        self.root.deiconify()
-        self.status_label.config(text="Trạng thái: Đã dừng", foreground="red")
+
+        # Hàm này gọi được từ cả nút bấm lẫn vòng lặp auto ở thread khác,
+        # nên phần đụng giao diện phải đi qua _ui
+        def _don_giao_dien():
+            if self.preview_window:
+                self.preview_window.destroy()
+                self.preview_window = None
+            self.root.deiconify()
+            self.status_label.config(text="Trạng thái: Đã dừng", foreground="red")
+
+        self._ui(_don_giao_dien)
 
     def save_config(self):
         config = {
@@ -1338,6 +1673,7 @@ class GameMakerApp:
             "click_count": self.click_count_var.get(),
             "random_mode": self.random_mode_var.get(),
             "stop_key": self.stop_key_var.get(),
+            "pause_key": self.pause_key_var.get(),
             "color_trigger": {
                 "enabled": self.color_trigger_enabled_var.get(),
                 "x": self.trigger_x_var.get(),
@@ -1374,7 +1710,14 @@ class GameMakerApp:
             self.interval_var.set(config.get("interval", 1.0))
             self.click_count_var.set(config.get("click_count", 0))
             self.random_mode_var.set(config.get("random_mode", False))
-            self.stop_key_var.set(config.get("stop_key", "q"))
+            # Chuẩn hóa khi tải: cấu hình cũ có thể ghi "pgup" hoặc "Page Up",
+            # mà sự kiện bàn phím luôn báo tên chuẩn nên không chuẩn hóa là phím chết
+            self.stop_key_var.set(
+                chuan_hoa_phim(config.get("stop_key")) or self.stop_key_var.get()
+            )
+            self.pause_key_var.set(
+                chuan_hoa_phim(config.get("pause_key")) or self.pause_key_var.get()
+            )
             color_trigger = config.get("color_trigger", {})
             self.color_trigger_enabled_var.set(color_trigger.get("enabled", False))
             self.trigger_x_var.set(color_trigger.get("x", 0))
@@ -1414,5 +1757,8 @@ class GameMakerApp:
 
 if __name__ == "__main__":
     root = tk.Tk()
+    # Chạy bằng pythonw nên không còn console: lỗi trong callback của Tkinter
+    # phải hiện ra hộp thoại, không thì nó biến mất không dấu vết
+    root.report_callback_exception = _bao_loi
     app = GameMakerApp(root)
     root.mainloop()
