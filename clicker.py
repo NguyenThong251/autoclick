@@ -131,8 +131,15 @@ def chuan_hoa_phim(raw):
         return None
 
 # Cấu hình PyAutoGUI
-pyautogui.FAILSAFE = True
+# Tắt failsafe: mặc định pyautogui dừng chương trình khi chuột chạm góc trên
+# trái. Ở đây điều đó vô nghĩa vì auto vốn đã tự nhường khi người dùng động
+# vào chuột, mà nó lại làm app dừng hẳn kèm hộp thoại giữa lúc đang chạy.
+# Đường thoát khẩn cấp giờ là phím thoát, dùng được mọi lúc.
+pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.05
+
+# Chuột phải đứng yên đủ lâu chừng này thì auto mới chạy tiếp
+GIAY_CHO_CHUOT_RANH = 2.0
 
 class GameMakerApp:
     def __init__(self, root):
@@ -172,6 +179,14 @@ class GameMakerApp:
         self._cfg_click_count = 0
         self._cfg_random = False
         self._cfg_trigger = None
+
+        # --- nhường chuột cho người dùng ---
+        # Chính app cũng làm con trỏ nhảy mỗi lần click, nên muốn biết người
+        # dùng có động vào chuột hay không thì phải nhớ chỗ app vừa đặt con trỏ
+        # tới, rồi so với chỗ con trỏ đang thực sự nằm.
+        self._vi_tri_app_dat = None
+        self._vi_tri_chuot_cuoi = None
+        self._luc_chuot_doi = 0.0
 
         self.screens = screens.ScreenLayout()
         self.preview_window = None
@@ -645,7 +660,9 @@ class GameMakerApp:
 
     def add_coord_click(self, event):
         if self.is_selecting:
-            x, y = pyautogui.position()
+            # Lấy tọa độ của CHÍNH cú click, không đọc vị trí chuột hiện tại:
+            # giữa lúc bấm và lúc xử lý, con trỏ có thể đã nhích đi vài pixel
+            x, y = event.x_root, event.y_root
             delay = self.new_delay_var.get()
             click_type = self.click_type_var.get()
             key = self.current_key.get()
@@ -667,8 +684,12 @@ class GameMakerApp:
                 self.key_actions[key].append({"name": name, "coords": [new_coord]})
             self.update_coord_listbox()
             if self.preview_window:
+                # Canvas có gốc tọa độ riêng nên phải trừ đi gốc desktop ảo,
+                # không thì chấm đỏ vẽ lệch hẳn sang chỗ khác
+                off_x, off_y, _w, _h = self.screens.virtual_bounds()
                 canvas = self.preview_window.winfo_children()[0]
-                canvas.create_oval(x-5, y-5, x+5, y+5, fill="red")
+                cx, cy = x - off_x, y - off_y
+                canvas.create_oval(cx - 5, cy - 5, cx + 5, cy + 5, fill="red")
             messagebox.showinfo("Thành công", f"Đã thêm tọa độ ({x}, {y}) vào hành động '{name}'!")
 
     def start_recording(self):
@@ -685,15 +706,18 @@ class GameMakerApp:
             fill="white", anchor="nw", font=("Arial", 14),
         )
         self.draw_existing_coords(canvas, offset)
-        canvas.bind("<Button-1>", lambda e: self.record_click("left"))
-        canvas.bind("<Button-2>", lambda e: self.record_click("middle"))
-        canvas.bind("<Button-3>", lambda e: self.record_click("right"))
+        canvas.bind("<Button-1>", lambda e: self.record_click("left", e))
+        canvas.bind("<Button-2>", lambda e: self.record_click("middle", e))
+        canvas.bind("<Button-3>", lambda e: self.record_click("right", e))
         self.last_click_time = time.time()
         threading.Thread(target=self.check_cancel_key, daemon=True).start()
 
-    def record_click(self, click_type):
+    def record_click(self, click_type, event=None):
         if self.is_recording:
-            x, y = pyautogui.position()
+            if event is not None:
+                x, y = event.x_root, event.y_root
+            else:
+                x, y = pyautogui.position()
             current_time = time.time()
             delay = current_time - self.last_click_time if self.last_click_time else 0.1
             self.last_click_time = current_time
@@ -716,8 +740,12 @@ class GameMakerApp:
                 self.key_actions[key].append({"name": name, "coords": [new_coord]})
             self.update_coord_listbox()
             if self.preview_window:
+                # Canvas có gốc tọa độ riêng nên phải trừ đi gốc desktop ảo,
+                # không thì chấm đỏ vẽ lệch hẳn sang chỗ khác
+                off_x, off_y, _w, _h = self.screens.virtual_bounds()
                 canvas = self.preview_window.winfo_children()[0]
-                canvas.create_oval(x-5, y-5, x+5, y+5, fill="red")
+                cx, cy = x - off_x, y - off_y
+                canvas.create_oval(cx - 5, cy - 5, cx + 5, cy + 5, fill="red")
             messagebox.showinfo("Thành công", f"Đã ghi tọa độ ({x}, {y}) vào hành động '{name}'!")
 
     def check_cancel_key(self):
@@ -1479,6 +1507,9 @@ class GameMakerApp:
                 # Chốt 1: chỗ duy nhất được phép ngủ dài khi tạm dừng
                 if not self._cho_tiep_tuc():
                     break
+                # Người dùng đang dùng chuột thì nhường, chờ họ buông ra
+                if not self._cho_chuot_ranh():
+                    break
                 # Thực hiện hành động của phím đang active
                 if self.current_active_key and self.current_active_key in self.key_actions:
                     for action in self.key_actions[self.current_active_key]:
@@ -1493,8 +1524,14 @@ class GameMakerApp:
                             # click thêm cả chục phát sau khi đã bấm tạm dừng
                             if not self.is_running or not self._resume_evt.is_set():
                                 break
+                            # Người dùng vừa chạm chuột thì bỏ dở hành động,
+                            # nhường ngay chứ không click nốt cho hết chuỗi
+                            if self._nguoi_dung_cham_chuot():
+                                break
                             if self.is_coord_trigger_matched(coord_item):
                                 pyautogui.click(x, y, button=click_type)
+                                self._vi_tri_app_dat = (x, y)
+                                self._vi_tri_chuot_cuoi = (x, y)
                             self._ngu(delay)
                         # Chốt 3: giữa hai hành động
                         if not self.is_running or not self._resume_evt.is_set():
@@ -1509,8 +1546,12 @@ class GameMakerApp:
                         # Chốt 5
                         if not self.is_running or not self._resume_evt.is_set():
                             break
+                        if self._nguoi_dung_cham_chuot():
+                            break
                         if self.is_trigger_color_matched():
                             pyautogui.click(x, y, button=click_type)
+                            self._vi_tri_app_dat = (x, y)
+                            self._vi_tri_chuot_cuoi = (x, y)
                         self._ngu(delay)
 
                 count += 1
@@ -1524,9 +1565,9 @@ class GameMakerApp:
                 self._ngu(0.01)
 
             except pyautogui.FailSafeException:
+                # Failsafe đã tắt nên nhánh này gần như không bao giờ chạy.
+                # Giữ lại cho chắc, nhưng dừng im lặng chứ không hiện hộp thoại.
                 self.stop_clicking()
-                self._ui(lambda: messagebox.showwarning(
-                    "Cảnh báo", "Game Maker dừng do chuột di chuyển vào góc trên trái (failsafe)."))
                 break
             except Exception as e:
                 self.stop_clicking()
@@ -1557,6 +1598,31 @@ class GameMakerApp:
             self.root.after(0, fn)
         except Exception:
             pass
+
+    def _nguoi_dung_cham_chuot(self):
+        """True nếu người dùng vừa động vào chuột trong vài giây gần đây.
+
+        Con trỏ nhảy vì hai lý do: người dùng di, hoặc chính app click. Phân
+        biệt bằng cách so vị trí hiện tại với chỗ app vừa click tới — khác chỗ
+        đó nghĩa là do người dùng.
+        """
+        try:
+            pos = tuple(pyautogui.position())
+        except Exception:
+            return False
+        if pos != self._vi_tri_chuot_cuoi:
+            self._vi_tri_chuot_cuoi = pos
+            if pos != self._vi_tri_app_dat:
+                self._luc_chuot_doi = time.time()
+        return (time.time() - self._luc_chuot_doi) < GIAY_CHO_CHUOT_RANH
+
+    def _cho_chuot_ranh(self):
+        """Đứng chờ tới khi chuột yên đủ lâu. False nghĩa là phải thoát vòng lặp."""
+        while self._nguoi_dung_cham_chuot():
+            if not self.is_running or self.is_quitting:
+                return False
+            self._stop_evt.wait(0.1)
+        return self.is_running and not self.is_quitting
 
     def _cho_tiep_tuc(self):
         """Đứng chờ tại đây khi đang tạm dừng. False nghĩa là phải thoát vòng lặp."""
@@ -1634,6 +1700,16 @@ class GameMakerApp:
                     ),
                     "tolerance": max(0, min(255, self.color_tolerance_var.get())),
                 }
+                # Lấy mốc vị trí chuột ngay bây giờ, nếu không app sẽ tưởng
+                # người dùng vừa di chuột và chờ vô cớ hai giây đầu
+                try:
+                    vt = tuple(pyautogui.position())
+                except Exception:
+                    vt = None
+                self._vi_tri_chuot_cuoi = vt
+                self._vi_tri_app_dat = vt
+                self._luc_chuot_doi = 0.0
+
                 self.is_running = True
                 self.is_paused = False
                 self._resume_evt.set()
