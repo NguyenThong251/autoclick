@@ -59,14 +59,24 @@ vào cửa sổ đích.
 
 **Cách dùng:**
 
-- Bật "Bật chuột ảo". Từ đó mỗi tọa độ mới sẽ tự gắn vào cửa sổ nằm dưới nó.
-- Cấu hình làm từ trước: bày các cửa sổ đích ra đúng chỗ rồi bấm "Gắn cửa sổ
-  cho tất cả tọa độ".
-- Bấm "Kiểm tra cửa sổ" rồi click vào đích để biết trước cửa sổ đó là gì và có
-  chụp được màu hay không.
+- Chọn tọa độ bằng "Chọn bằng chuột" (hoặc "Ghi hành động"), click thẳng lên
+  app đích. Mỗi tọa độ tự nhớ cửa sổ nằm dưới cú click đó — lúc ấy là lúc duy
+  nhất biết chắc đó đúng là app anh nhắm tới.
+- Tích "Bật chuột ảo" rồi bấm Bắt đầu. Danh sách tọa độ hiện tên app mỗi tọa độ
+  sẽ click vào, ví dụ `[M1 · chrome.exe]`.
+- Tọa độ nhập tay bằng "Thêm tọa độ" không biết cửa sổ nào, danh sách ghi
+  `CHƯA GẮN CỬA SỔ` và nút Bắt đầu khóa lại. Xóa rồi chọn lại bằng chuột.
+- Muốn đổi app đích cho một tọa độ thì xóa rồi chọn lại.
+
+App **không bao giờ tự đoán cửa sổ** cho tọa độ có sẵn. Đoán theo cửa sổ đang
+nằm trên cùng là sai: lúc tích ô, thứ nằm trên cùng thường là app vừa dùng
+xong, còn nền desktop luôn phủ kín màn hình nên điểm nào cũng "có cửa sổ".
 
 Tọa độ bám theo cửa sổ: kéo cửa sổ đi chỗ khác thì tọa độ đi theo. Cửa sổ đóng
 thì tọa độ bị tô đỏ và nút Bắt đầu khóa lại.
+
+Bỏ tích thì quay về chuột thật và click **đúng chỗ đã chọn trên màn hình**,
+không bám theo cửa sổ nào.
 
 **Giới hạn, không lách được:**
 
