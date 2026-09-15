@@ -46,6 +46,11 @@ _NUT = {
 }
 
 GA_ROOT = 2
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT = 0x00000020
+CWP_SKIPINVISIBLE = 0x0001
+CWP_SKIPDISABLED = 0x0002
+CWP_SKIPTRANSPARENT = 0x0004
 PW_RENDERFULLCONTENT = 0x00000002
 DIB_RGB_COLORS = 0
 BI_RGB = 0
@@ -99,6 +104,10 @@ user32.WindowFromPoint.argtypes = [POINT]
 user32.WindowFromPoint.restype = wintypes.HWND
 user32.RealChildWindowFromPoint.argtypes = [wintypes.HWND, POINT]
 user32.RealChildWindowFromPoint.restype = wintypes.HWND
+user32.ChildWindowFromPointEx.argtypes = [wintypes.HWND, POINT, wintypes.UINT]
+user32.ChildWindowFromPointEx.restype = wintypes.HWND
+user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
 user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
 user32.GetAncestor.restype = wintypes.HWND
 user32.GetWindowDC.argtypes = [wintypes.HWND]
@@ -277,10 +286,29 @@ def child_at(root, x, y):
         if not user32.ScreenToClient(wintypes.HWND(hwnd), ctypes.byref(p)):
             break
         con = user32.RealChildWindowFromPoint(wintypes.HWND(hwnd), p)
+        if con and con != hwnd and _xuyen_thau(con):
+            # Cửa sổ con xuyên thấu (WS_EX_TRANSPARENT) thì chuột thật bấm xuyên
+            # qua nó, không bao giờ tới nó. RealChildWindowFromPoint lại không bỏ
+            # qua loại này. Chrome là ví dụ điển hình: lớp "Intermediate D3D
+            # Window" để vẽ hình phủ kín cửa sổ, gửi click vào đó là bị lờ đi.
+            # Chỉ đổi cách tìm khi gặp đúng trường hợp này, để giữ nguyên cách xử
+            # lý khung nhóm (group box) của RealChildWindowFromPoint cho app thường.
+            con = user32.ChildWindowFromPointEx(
+                wintypes.HWND(hwnd), p,
+                CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT,
+            )
         if not con or con == hwnd:
             break
         hwnd = con
     return hwnd
+
+
+def _xuyen_thau(hwnd):
+    """True nếu cửa sổ để chuột bấm xuyên qua (cờ WS_EX_TRANSPARENT)."""
+    try:
+        return bool(user32.GetWindowLongPtrW(wintypes.HWND(hwnd), GWL_EXSTYLE) & WS_EX_TRANSPARENT)
+    except Exception:
+        return False
 
 
 # --- nhận lại cửa sổ sau khi mở lại app ----------------------------------
