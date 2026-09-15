@@ -1814,11 +1814,12 @@ class GameMakerApp:
         click_count = self._cfg_click_count
         random_mode = self._cfg_random
 
-        # Giấu cửa sổ và chờ ba giây là để người dùng kịp rời tay rồi chuyển
-        # sang cửa sổ đích. Chuột ảo không đụng tới chuột lẫn cửa sổ đang dùng
-        # nên cả hai việc đó đều thừa, mà giấu đi còn mất chỗ xem trạng thái.
-        if not self._cfg_virtual:
-            self._ui(self.root.withdraw)
+        # Bấm Bắt đầu là giấu cửa sổ, cả ở chế độ chuột ảo: người dùng muốn app
+        # chạy ngầm hẳn, không nằm chắn màn hình. Điều khiển lúc chạy bằng phím
+        # tắt (tạm dừng / thoát).
+        self._ui(self.root.withdraw)
+        # Riêng khoảng chờ ba giây thì chỉ chuột thật mới cần, để người dùng kịp
+        # rời tay khỏi chuột. Chuột ảo không đụng tới con trỏ nên chạy ngay.
         self._ui(lambda: self.status_label.config(
             text="Trạng thái: Đang chạy" + (" (chuột ảo)" if self._cfg_virtual else ""),
             foreground="green",
