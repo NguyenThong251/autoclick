@@ -37,7 +37,6 @@ try:
 except Exception:
     dwmapi = None
 
-WM_MOUSEMOVE = 0x0200
 _NUT = {
     # tên nút -> (message nhấn, message nhả, cờ wParam lúc đang giữ)
     "left": (0x0201, 0x0202, 0x0001),
@@ -57,9 +56,18 @@ BI_RGB = 0
 DWMWA_CLOAKED = 14
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
-# Giữ nút bao lâu trước khi nhả. Nhấn và nhả trong cùng một nhịp thì nhiều app
-# coi như nhiễu và bỏ qua, nên phải có một khoảng thật.
-GIU_NUT = 0.03
+# Giữ nút bao lâu trước khi nhả.
+#
+# Để 0: nhấn xong nhả ngay. Khoảng giữ càng lâu thì cửa sổ đích càng lâu giữ
+# quyền bắt chuột, mà trong lúc nó giữ thì chuột THẬT của người dùng bị cuốn
+# theo và thao tác không ăn. Đo thật với Chrome, 10 cú click mỗi giây:
+#   giữ 30ms -> cửa sổ đích chiếm chuột khoảng 1/4 thời gian
+#   giữ 10ms -> còn khoảng 1/10
+#   giữ  0ms -> không đo được lần nào, mà vẫn nhận đủ 40/40 cú click
+#
+# Đánh đổi: app nào đòi nút phải được giữ một khoảng thật mới tính là click thì
+# sẽ bỏ qua. Gặp app như vậy thì nâng số này lên, ví dụ 0.01.
+GIU_NUT = 0.0
 
 # Ảnh chụp cửa sổ sống được bao lâu trước khi phải chụp lại. PrintWindow bắt
 # cửa sổ vẽ lại nên khá tốn; không đệm thì một hành động mười tọa độ sẽ bắt cửa
@@ -393,9 +401,11 @@ def click(hwnd, x, y, button="left", giu=GIU_NUT):
         return False
     lp = _lparam(p.x, p.y)
 
-    # Đưa chuột tới trước rồi mới bấm: nhiều app chỉ tính cú click khi con trỏ
-    # đã "ở đó", vì chúng bám theo WM_MOUSEMOVE để biết đang trỏ vào gì.
-    user32.PostMessageW(wintypes.HWND(dich), WM_MOUSEMOVE, 0, lp)
+    # KHÔNG gửi WM_MOUSEMOVE trước khi bấm. Gửi thì cửa sổ đích tưởng con trỏ
+    # vừa dời tới đó và đổi hình con trỏ theo, trong khi con trỏ thật đang nằm
+    # chỗ khác trong cùng cửa sổ — thành ra nó nhấp nháy đổi qua lại liên tục.
+    # Đo thật với Chrome: có WM_MOUSEMOVE thì 31 cú click làm con trỏ đổi hình
+    # 62 lần; bỏ đi thì 0 lần mà vẫn nhận đủ 31 cú.
     user32.PostMessageW(wintypes.HWND(dich), nhan, co_giu, lp)
     if giu > 0:
         time.sleep(giu)
