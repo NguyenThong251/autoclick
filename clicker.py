@@ -142,18 +142,6 @@ pyautogui.PAUSE = 0.05
 # Chuột phải đứng yên đủ lâu chừng này thì auto mới chạy tiếp
 GIAY_CHO_CHUOT_RANH = 2.0
 
-# Tìm lại một cửa sổ phải duyệt toàn bộ cửa sổ của hệ thống, nên nhớ cả kết quả
-# "không thấy" chừng này giây rồi mới thử lại. Không nhớ thì mỗi lần vẽ lại danh
-# sách tọa độ là một lần duyệt, treo cứng giao diện khi cửa sổ đích đã đóng.
-GIAY_TIM_LAI_CUA_SO = 1.0
-
-
-def khoa_cua_so(sig):
-    """Khóa tra cứu hwnd từ thông tin cửa sổ đã lưu."""
-    if not sig:
-        return None
-    return "%s|%s|%s" % (sig.get("exe", ""), sig.get("class", ""), sig.get("title", ""))
-
 class GameMakerApp:
     def __init__(self, root):
         self.root = root
@@ -207,11 +195,6 @@ class GameMakerApp:
         # thừa, vì app không còn tranh chuột với người dùng nữa.
         self._pid_app = os.getpid()
         self._cfg_virtual = False
-        self._hwnd_cache = {}       # khóa cửa sổ -> (lúc tìm, hwnd hoặc None)
-        self._loi_doc_mau = 0       # số lần không chụp được cửa sổ trong một lần chạy
-        self.trigger_window = None  # cửa sổ gắn với điểm trigger chung
-        self.trigger_win_rel = None
-        self._dang_dat_trigger = False  # đang đặt X/Y trigger từ cú click lên cửa sổ
 
         self.screens = screens.ScreenLayout()
         self.preview_window = None
@@ -254,8 +237,6 @@ class GameMakerApp:
         self.color_trigger_enabled_var = tk.BooleanVar(value=False)
         self.trigger_x_var = tk.IntVar(value=0)
         self.trigger_y_var = tk.IntVar(value=0)
-        self.trigger_x_var.trace_add("write", self._bo_gan_cua_so_trigger)
-        self.trigger_y_var.trace_add("write", self._bo_gan_cua_so_trigger)
         self.trigger_r_var = tk.IntVar(value=255)
         self.trigger_g_var = tk.IntVar(value=255)
         self.trigger_b_var = tk.IntVar(value=255)
@@ -628,12 +609,12 @@ class GameMakerApp:
                         coord_item = self.normalize_coord(coord)
                         trigger_count = len(coord_item["trigger_colors"])
                         trigger_text = f"{trigger_count} màu trigger" if trigger_count else "No trigger"
-                        tag = self.monitor_tag(coord_item) + self.window_tag(coord_item)
+                        tag = self.monitor_tag(coord_item)
                         self.coord_listbox.insert(
                             tk.END,
                             f"[{tag}] X: {coord_item['x']}, Y: {coord_item['y']}, Delay: {coord_item['delay']:.2f}s, Click: {coord_item['click_type']}, Trigger: {trigger_text}"
                         )
-                        if self.can_chon_lai(coord_item):
+                        if coord_item.get("missing_monitor"):
                             self.coord_listbox.itemconfig(
                                 tk.END, foreground="white", background="#c0392b"
                             )
@@ -673,9 +654,6 @@ class GameMakerApp:
             "delay": delay,
             "click_type": click_type,
             "trigger_colors": [],
-            "window": None,
-            "win_rel_x": None,
-            "win_rel_y": None,
         }
         for action in self.key_actions[key]:
             if action["name"] == name:
@@ -716,16 +694,12 @@ class GameMakerApp:
             name = self.current_action_name.get()
             if key not in self.key_actions:
                 self.key_actions[key] = []
-            sig_cs, wrx, wry = self.gan_cua_so(x, y)
             new_coord = {
                 "x": x,
                 "y": y,
                 "delay": delay,
                 "click_type": click_type,
                 "trigger_colors": [],
-                "window": sig_cs,
-                "win_rel_x": wrx,
-                "win_rel_y": wry,
             }
             for action in self.key_actions[key]:
                 if action["name"] == name:
@@ -776,16 +750,12 @@ class GameMakerApp:
             name = self.current_action_name.get()
             if key not in self.key_actions:
                 self.key_actions[key] = []
-            sig_cs, wrx, wry = self.gan_cua_so(x, y)
             new_coord = {
                 "x": x,
                 "y": y,
                 "delay": delay,
                 "click_type": click_type,
                 "trigger_colors": [],
-                "window": sig_cs,
-                "win_rel_x": wrx,
-                "win_rel_y": wry,
             }
             for action in self.key_actions[key]:
                 if action["name"] == name:
@@ -878,13 +848,8 @@ class GameMakerApp:
                 "monitor": coord.get("monitor"),
                 "rel_x": coord.get("rel_x"),
                 "rel_y": coord.get("rel_y"),
-                "window": coord.get("window"),
-                "win_rel_x": coord.get("win_rel_x"),
-                "win_rel_y": coord.get("win_rel_y"),
             }
-            # Gắn cửa sổ TRƯỚC gắn màn hình: cửa sổ dời chỗ thì tọa độ tuyệt
-            # đối đổi theo, và màn hình phải tính lại từ tọa độ mới đó
-            return self.attach_monitor(self.attach_window(item))
+            return self.attach_monitor(item)
         if isinstance(coord, (list, tuple)) and len(coord) >= 4:
             return self.attach_monitor({
                 "x": int(coord[0]),
@@ -895,14 +860,10 @@ class GameMakerApp:
                 "monitor": None,
                 "rel_x": None,
                 "rel_y": None,
-                "window": None,
-                "win_rel_x": None,
-                "win_rel_y": None,
             })
         return self.attach_monitor({
             "x": 0, "y": 0, "delay": 0.1, "click_type": "left",
             "trigger_colors": [], "monitor": None, "rel_x": None, "rel_y": None,
-            "window": None, "win_rel_x": None, "win_rel_y": None,
         })
 
     def attach_monitor(self, item):
@@ -949,63 +910,11 @@ class GameMakerApp:
         var = getattr(self, "virtual_mouse_var", None)
         return bool(var.get()) if var is not None else False
 
-    def attach_window(self, item):
-        """Bám theo cửa sổ đã gắn: cửa sổ dời chỗ thì tọa độ dời theo.
-
-        Chỉ áp dụng khi đang bật chuột ảo. Ở chế độ chuột thật, tọa độ là đúng
-        chỗ đã chọn trên màn hình và không được chạy theo cửa sổ nào: nếu không,
-        kéo một cửa sổ đi là điểm click thật cũng nhảy theo mà không ai ngờ.
-
-        Tọa độ không gắn cửa sổ thì bỏ qua, vẫn tính theo màn hình như cũ. Nhờ
-        vậy cấu hình cũ chạy y nguyên, không phải sửa gì.
-        """
-        sig = item.get("window")
-        if (not sig or item.get("win_rel_x") is None or item.get("win_rel_y") is None
-                or not self._dang_dung_chuot_ao()):
-            item["missing_window"] = False
-            return item
-        hwnd = self._hwnd_cua(sig)
-        rect = virtual_mouse.window_rect(hwnd) if hwnd else None
-        if rect is None:
-            # Cửa sổ đã đóng -> đánh dấu hỏng, giữ nguyên tọa độ cũ để còn nhìn
-            item["missing_window"] = True
-            return item
-        item["x"] = rect[0] + int(item["win_rel_x"])
-        item["y"] = rect[1] + int(item["win_rel_y"])
-        # Cửa sổ vừa dời chỗ thì tọa độ tương đối theo màn không còn đúng nữa,
-        # xóa đi để attach_monitor tính lại từ tọa độ tuyệt đối mới
-        item["rel_x"] = None
-        item["rel_y"] = None
-        item["missing_window"] = False
-        return item
-
     def monitor_tag(self, coord_item):
         if coord_item.get("missing_monitor"):
             return "THIẾU MÀN"
         sig = coord_item.get("monitor") or {}
         return "M%s" % sig.get("index", "?")
-
-    def window_tag(self, coord_item):
-        """Phần đuôi ghi cửa sổ trong danh sách tọa độ.
-
-        Chỉ hiện khi bật chuột ảo: ở chế độ chuột thật cửa sổ không dùng tới,
-        hiện ra chỉ làm người dùng tưởng app sẽ click vào đó.
-        """
-        if not self._dang_dung_chuot_ao():
-            return ""
-        sig = coord_item.get("window")
-        if not sig:
-            return " · CHƯA GẮN CỬA SỔ"
-        if coord_item.get("missing_window"):
-            return " · THIẾU CỬA SỔ"
-        return " · " + (sig.get("exe") or sig.get("class") or "?")
-
-    def can_chon_lai(self, coord_item):
-        """Tọa độ này có chạy được ở chế độ hiện tại không, để tô đỏ trong danh sách."""
-        if coord_item.get("missing_monitor") or coord_item.get("missing_window"):
-            return True
-        # Chuột ảo mà tọa độ chưa gắn cửa sổ thì không biết click vào đâu
-        return self._dang_dung_chuot_ao() and not coord_item.get("window")
 
     def make_overlay(self, alpha=0.8):
         """Dựng lớp phủ trải kín MỌI màn hình.
@@ -1195,12 +1104,8 @@ class GameMakerApp:
         text = "Màn hình: " + "  |  ".join(phan)
         mau = "black"
         hong = self.missing_monitor_coords()
-        mat_cua_so = self.missing_window_coords()
         if hong:
             text += "  —  %d hành động có tọa độ thiếu màn hình" % len(hong)
-            mau = "red"
-        elif mat_cua_so:
-            text += "  —  %d hành động có tọa độ mất cửa sổ" % len(mat_cua_so)
             mau = "red"
         elif not screens.dpi_ok():
             text += "  —  CẢNH BÁO: không khai báo được DPI per-monitor"
@@ -1338,7 +1243,7 @@ class GameMakerApp:
             canvas.create_oval(x-5, y-5, x+5, y+5, fill="red")
             canvas.create_text(
                 x + 10, y - 10,
-                text=self.monitor_tag(coord_item) + self.window_tag(coord_item),
+                text=self.monitor_tag(coord_item),
                 fill="#ffd700", anchor="nw", font=("Arial", 11, "bold"),
             )
         canvas.create_text(
@@ -1364,132 +1269,44 @@ class GameMakerApp:
         """
         self.settings = settings.update(virtual_mouse=bool(self.virtual_mouse_var.get()))
         if not self.is_running and hasattr(self, "coord_listbox"):
-            self._hwnd_cache.clear()
             self.update_coord_listbox()
 
-    def _hwnd_cua(self, sig):
-        """hwnd của cửa sổ đã lưu, None nếu cửa sổ không còn mở.
-
-        Nhớ cả kết quả "không thấy": tìm lại phải duyệt toàn bộ cửa sổ hệ
-        thống, mà hàm này bị gọi cho từng tọa độ mỗi lần vẽ lại danh sách.
-        """
-        khoa = khoa_cua_so(sig)
-        if khoa is None:
-            return None
-        bay_gio = time.time()
-        cu = self._hwnd_cache.get(khoa)
-        if cu is not None:
-            luc, hwnd = cu
-            if hwnd and virtual_mouse.is_alive(hwnd):
-                return hwnd
-            if not hwnd and bay_gio - luc < GIAY_TIM_LAI_CUA_SO:
-                return None
-        hwnd = virtual_mouse.find_window(sig)
-        self._hwnd_cache[khoa] = (bay_gio, hwnd)
-        return hwnd
-
-    def gan_cua_so(self, x, y):
-        """Cửa sổ nằm dưới một cú click người dùng VỪA bấm lên, để gắn vào tọa độ.
-
-        CHỈ được gọi ngay lúc người dùng click lên app đích (chọn bằng chuột,
-        ghi hành động, chọn điểm màu). Đó là lúc duy nhất biết chắc cửa sổ
-        nằm dưới điểm đó chính là app họ đang nhắm tới.
-
-        Tuyệt đối không gọi để đoán cửa sổ cho tọa độ có sẵn, lúc tích ô hay
-        lúc bấm Bắt đầu: khi ấy thứ nằm trên cùng thường là app người dùng vừa
-        dùng xong (Chrome, Zalo...), hoặc chính nền desktop — Progman luôn phủ
-        kín màn hình nên điểm nào cũng "có cửa sổ". Gắn theo đó là click nhầm app.
-
-        Gắn luôn cả khi đang tắt chuột ảo, để bật lên sau vẫn dùng được ngay.
-        Chế độ chuột thật thì không đụng tới thông tin này (xem attach_window).
-
-        Bắt buộc bỏ qua tiến trình của chính app: lúc chọn tọa độ thì lớp phủ
-        đang trùm lên tất cả, không loại ra thì mọi tọa độ đều gắn vào lớp phủ.
-        """
-        try:
-            hwnd = virtual_mouse.window_at(x, y, bo_qua_pid=self._pid_app)
-            rect = virtual_mouse.window_rect(hwnd) if hwnd else None
-            if rect is None:
-                return None, None, None
-            return virtual_mouse.signature(hwnd), int(x) - rect[0], int(y) - rect[1]
-        except Exception:
-            return None, None, None
-
-    def missing_window_coords(self):
-        """Các hành động có tọa độ trỏ tới cửa sổ giờ không còn mở."""
-        hong = []
-        for key, actions in self.key_actions.items():
-            for action in actions:
-                for coord in action["coords"]:
-                    if self.normalize_coord(coord).get("missing_window"):
-                        hong.append((key, action["name"]))
-                        break
-        return hong
-
     def _doc_mau(self, coord_item):
-        """Đọc màu tại một tọa độ, theo đúng chế độ đang chạy."""
-        return self._doc_mau_diem(
-            coord_item["x"], coord_item["y"], coord_item.get("window")
-        )
+        """Đọc màu tại một tọa độ."""
+        return self._doc_mau_diem(coord_item["x"], coord_item["y"])
 
-    def _doc_mau_diem(self, x, y, sig=None, win_rel=None):
-        """Đọc màu tại một điểm, theo đúng chế độ đang chạy.
+    def _doc_mau_diem(self, x, y):
+        """Đọc màu tại một điểm trên màn hình.
 
-        Có gắn cửa sổ thì đọc từ chính cửa sổ đó nên cửa sổ bị che vẫn ra màu
-        đúng, và bám theo nó nếu nó đã dời chỗ.
-
-        Chụp hỏng thì trả None chứ KHÔNG lùi về đọc màn hình: chỗ đó lúc ấy
-        đang là cửa sổ nằm đè lên, lấy màu của app khác rồi click bừa còn tệ
-        hơn là không click.
+        Đọc thẳng từ màn hình ở cả hai chế độ. Chuột ảo cũng click vào thứ đang
+        nằm tại điểm đó, nên màu nhìn thấy trên màn hình chính là màu của thứ
+        sắp ăn cú click.
         """
-        dung_ao = self._cfg_virtual if self.is_running else self.virtual_mouse_var.get()
-        if dung_ao and sig:
-            hwnd = self._hwnd_cua(sig)
-            if hwnd:
-                if win_rel and win_rel[0] is not None:
-                    rect = virtual_mouse.window_rect(hwnd)
-                    if rect is not None:
-                        x, y = rect[0] + int(win_rel[0]), rect[1] + int(win_rel[1])
-                mau = virtual_mouse.read_pixel(hwnd, x, y)
-                if mau is not None:
-                    return mau
-            self._loi_doc_mau += 1
-            return None
         try:
             return self.screens.read_pixel(x, y)
         except Exception:
             return None
 
-    def _click(self, coord_item, x, y, click_type):
-        """Một cú click, đi qua chuột thật hay chuột ảo tùy chế độ."""
+    def _click(self, x, y, click_type):
+        """Một cú click tại một điểm CỐ ĐỊNH trên màn hình.
+
+        Chuột ảo gửi click vào cửa sổ đang nằm tại điểm đó ngay lúc ấy, đúng
+        như chuột thật bấm xuống đó. Tọa độ không bám theo cửa sổ nào: cửa sổ
+        dời đi thì điểm click vẫn đứng nguyên chỗ cũ trên màn hình.
+
+        Khác biệt duy nhất của chuột ảo là con trỏ thật không nhúc nhích.
+        """
         if not self._cfg_virtual:
             pyautogui.click(x, y, button=click_type)
             # Nhớ chỗ vừa đặt con trỏ, để phân biệt với lúc người dùng tự di chuột
             self._vi_tri_app_dat = (x, y)
             self._vi_tri_chuot_cuoi = (x, y)
             return True
-        sig = coord_item.get("window")
-        if sig:
-            hwnd = self._hwnd_cua(sig)
-        else:
-            # Tọa độ chưa gắn cửa sổ (chế độ ngẫu nhiên) thì lấy cửa sổ đang
-            # nằm tại đó ngay lúc này
-            hwnd = virtual_mouse.window_at(x, y, bo_qua_pid=self._pid_app)
+        hwnd = virtual_mouse.window_at(x, y, bo_qua_pid=self._pid_app)
         if not hwnd:
             return False
         # Chuột ảo không dời con trỏ nên không đụng tới mốc vị trí chuột
         return virtual_mouse.click(hwnd, x, y, button=click_type)
-
-    def unbound_coords(self):
-        """Các hành động còn tọa độ chưa gắn cửa sổ nào (nhập tay, hoặc từ bản cũ)."""
-        thieu = []
-        for key, actions in self.key_actions.items():
-            for action in actions:
-                for coord in action["coords"]:
-                    if not self.normalize_coord(coord).get("window"):
-                        thieu.append((key, action["name"]))
-                        break
-        return thieu
 
     # --- bàn phím ---------------------------------------------------------
 
@@ -1640,17 +1457,6 @@ class GameMakerApp:
         except Exception:
             pass
 
-    def _bo_gan_cua_so_trigger(self, *_args):
-        """X/Y trigger đổi bằng tay thì bỏ cửa sổ đã gắn với điểm trigger.
-
-        Không bỏ thì lúc chạy chuột ảo vẫn đọc màu ở điểm CŨ trong cửa sổ cũ,
-        lờ đi X/Y mới mà không báo gì. Cửa sổ chỉ được gắn khi chọn điểm bằng
-        cú click lên chính cửa sổ đó.
-        """
-        if not self._dang_dat_trigger:
-            self.trigger_window = None
-            self.trigger_win_rel = None
-
     def set_trigger_from_mouse(self):
         x, y = pyautogui.position()
         self.trigger_x_var.set(x)
@@ -1701,12 +1507,8 @@ class GameMakerApp:
 
         # Đặt X/Y từ chính cú click này thì cửa sổ sẽ được gắn lại ngay bên dưới,
         # nên đừng để việc đổi X/Y xóa mất nó
-        self._dang_dat_trigger = True
-        try:
-            self.trigger_x_var.set(x)
-            self.trigger_y_var.set(y)
-        finally:
-            self._dang_dat_trigger = False
+        self.trigger_x_var.set(x)
+        self.trigger_y_var.set(y)
 
         if self.preview_window:
             self.preview_window.destroy()
@@ -1742,9 +1544,7 @@ class GameMakerApp:
             else:
                 # Điểm trigger chung cũng gắn vào cửa sổ, để lúc chạy còn đọc
                 # được màu khi cửa sổ đã bị che
-                self.trigger_window, wrx, wry = self.gan_cua_so(x, y)
-                self.trigger_win_rel = (wrx, wry) if self.trigger_window else None
-                mau = self._doc_mau_diem(x, y, self.trigger_window, self.trigger_win_rel)
+                mau = self._doc_mau_diem(x, y)
                 if mau is None:
                     raise OSError("không chụp được cửa sổ tại điểm này")
                 r, g, b = mau
@@ -1778,16 +1578,12 @@ class GameMakerApp:
                     self.trigger_b_var.get(),
                 ),
                 "tolerance": max(0, min(255, self.color_tolerance_var.get())),
-                "window": self.trigger_window,
-                "win_rel": self.trigger_win_rel,
             }
         if not cfg["enabled"]:
             return True
         target = cfg["rgb"]
         tolerance = cfg["tolerance"]
-        current = self._doc_mau_diem(
-            cfg["x"], cfg["y"], cfg.get("window"), cfg.get("win_rel")
-        )
+        current = self._doc_mau_diem(cfg["x"], cfg["y"])
         if current is None:
             # Không đọc được màu thì coi như chưa tới lúc, đừng click bừa
             return False
@@ -1859,7 +1655,7 @@ class GameMakerApp:
                             if not self._cfg_virtual and self._nguoi_dung_cham_chuot():
                                 break
                             if self.is_coord_trigger_matched(coord_item):
-                                self._click(coord_item, x, y, click_type)
+                                self._click(x, y, click_type)
                             self._ngu(delay)
                         # Chốt 3: giữa hai hành động
                         if not self.is_running or not self._resume_evt.is_set():
@@ -1877,7 +1673,7 @@ class GameMakerApp:
                         if not self._cfg_virtual and self._nguoi_dung_cham_chuot():
                             break
                         if self.is_trigger_color_matched():
-                            self._click({}, x, y, click_type)
+                            self._click(x, y, click_type)
                         self._ngu(delay)
 
                 count += 1
@@ -1904,18 +1700,6 @@ class GameMakerApp:
         # Đang thoát hẳn thì bỏ qua phần dọn dẹp UI, _shutdown lo phần còn lại
         if self.is_quitting:
             return
-
-        # Đọc màu hỏng là lỗi âm thầm: app đứng im không click mà không báo gì.
-        # Phải nói rõ, không thì người dùng tưởng cấu hình sai.
-        if self._loi_doc_mau:
-            so = self._loi_doc_mau
-            self._ui(lambda: messagebox.showwarning(
-                "Chuột ảo",
-                "Có %d lần không đọc được màu từ cửa sổ đích, và trong những lần "
-                "đó app không click.\n\n"
-                "Thường là do cửa sổ đích bị thu nhỏ hoặc đã đóng. Cửa sổ chỉ bị "
-                "che thì vẫn đọc được bình thường." % so,
-            ))
 
         # Hook bàn phím là hook toàn cục, giữ nguyên cho lần chạy sau.
         # Trước đây chỗ này gỡ hook theo tên và rất dễ ném lỗi, làm cửa sổ
@@ -2023,39 +1807,6 @@ class GameMakerApp:
                         "Cắm lại màn hình đó, hoặc xóa và đặt lại các tọa độ đã tô đỏ.",
                     )
                     return
-                if self.virtual_mouse_var.get():
-                    # Ảnh chụp và hwnd của lần chạy trước không còn đáng tin
-                    virtual_mouse.invalidate()
-                    self._hwnd_cache.clear()
-                    # KHÔNG tự đoán cửa sổ cho tọa độ chưa gắn: lúc này thứ nằm
-                    # trên cùng thường là app người dùng vừa dùng hoặc nền desktop,
-                    # đoán theo đó là click nhầm app. Chặn lại và chỉ cách sửa.
-                    chua_gan = self.unbound_coords()
-                    if chua_gan:
-                        self.update_coord_listbox()
-                        danh_sach = "\n".join(f"  - Phím {k}, hành động '{n}'" for k, n in chua_gan)
-                        messagebox.showerror(
-                            "Lỗi",
-                            "Chuột ảo cần biết click vào cửa sổ nào, mà các hành động sau còn "
-                            "tọa độ chưa gắn cửa sổ (nhập tay bằng 'Thêm tọa độ', hoặc chọn từ "
-                            "bản cũ):\n\n"
-                            f"{danh_sach}\n\n"
-                            "Xóa các tọa độ ghi 'CHƯA GẮN CỬA SỔ' rồi chọn lại bằng "
-                            "'Chọn bằng chuột', click thẳng lên app đích.",
-                        )
-                        return
-                    mat_cua_so = self.missing_window_coords()
-                    if mat_cua_so:
-                        danh_sach = "\n".join(f"  - Phím {k}, hành động '{n}'" for k, n in mat_cua_so)
-                        messagebox.showerror(
-                            "Lỗi",
-                            "Không chạy được vì có tọa độ trỏ tới cửa sổ không còn mở:\n\n"
-                            f"{danh_sach}\n\n"
-                            "Mở lại cửa sổ đó rồi bấm Bắt đầu lại, hoặc xóa và chọn lại "
-                            "các tọa độ đã tô đỏ.",
-                        )
-                        return
-                self._loi_doc_mau = 0
                 # Chụp lại cấu hình ngay tại đây, trên main thread. Vòng lặp
                 # auto chạy ở thread riêng và không được phép đọc Tkinter.
                 self._cfg_click_count = self.click_count_var.get()
@@ -2071,8 +1822,6 @@ class GameMakerApp:
                         self.trigger_b_var.get(),
                     ),
                     "tolerance": max(0, min(255, self.color_tolerance_var.get())),
-                    "window": self.trigger_window,
-                    "win_rel": self.trigger_win_rel,
                 }
                 # Lấy mốc vị trí chuột ngay bây giờ, nếu không app sẽ tưởng
                 # người dùng vừa di chuột và chờ vô cớ hai giây đầu
@@ -2138,8 +1887,6 @@ class GameMakerApp:
                 "g": self.trigger_g_var.get(),
                 "b": self.trigger_b_var.get(),
                 "tolerance": self.color_tolerance_var.get(),
-                "window": self.trigger_window,
-                "win_rel": self.trigger_win_rel,
             },
             # Bố cục màn hình lúc lưu, để khi tải lại còn đối chiếu và báo lệch
             "monitors": [
@@ -2185,10 +1932,6 @@ class GameMakerApp:
             self.trigger_g_var.set(color_trigger.get("g", 255))
             self.trigger_b_var.set(color_trigger.get("b", 255))
             self.color_tolerance_var.set(color_trigger.get("tolerance", 10))
-            self.trigger_window = color_trigger.get("window")
-            win_rel = color_trigger.get("win_rel")
-            self.trigger_win_rel = tuple(win_rel) if win_rel else None
-            self._hwnd_cache.clear()
             self.key_actions = {
                 key: [
                     {"name": action["name"], "coords": [self.normalize_coord(coord) for coord in action["coords"]]}

@@ -50,44 +50,33 @@ Tọa độ có màu riêng thì màu riêng thắng, không dùng trigger chung
 
 ## Chuột ảo (click ngầm)
 
-Click thẳng vào cửa sổ đích mà không đụng tới con trỏ thật, nên vừa auto vừa
-dùng máy bình thường được.
+Click vào một **điểm cố định trên màn hình** mà không đụng tới con trỏ thật,
+nên vừa auto vừa dùng máy bình thường được.
 
 Windows chỉ có duy nhất một con trỏ chuột và không tạo thêm được nếu không viết
 driver. Nên chế độ này không tạo con trỏ thứ hai, mà gửi thẳng message chuột
-vào cửa sổ đích.
+vào cửa sổ đang nằm tại điểm đó.
+
+**Tọa độ là điểm trên màn hình, không gắn vào app nào.** Kéo một cửa sổ đi chỗ
+khác thì điểm click vẫn đứng nguyên; lúc đó app click vào thứ đang nằm ở đấy,
+y như chuột thật bấm xuống. Bật hay tắt chuột ảo cũng cùng một điểm.
 
 **Cách dùng:**
 
-- Chọn tọa độ bằng "Chọn bằng chuột" (hoặc "Ghi hành động"), click thẳng lên
-  app đích. Mỗi tọa độ tự nhớ cửa sổ nằm dưới cú click đó — lúc ấy là lúc duy
-  nhất biết chắc đó đúng là app anh nhắm tới.
-- Tích "Bật chuột ảo" rồi bấm Bắt đầu. Danh sách tọa độ hiện tên app mỗi tọa độ
-  sẽ click vào, ví dụ `[M1 · chrome.exe]`.
-- Tọa độ nhập tay bằng "Thêm tọa độ" không biết cửa sổ nào, danh sách ghi
-  `CHƯA GẮN CỬA SỔ` và nút Bắt đầu khóa lại. Xóa rồi chọn lại bằng chuột.
-- Muốn đổi app đích cho một tọa độ thì xóa rồi chọn lại.
-
-App **không bao giờ tự đoán cửa sổ** cho tọa độ có sẵn. Đoán theo cửa sổ đang
-nằm trên cùng là sai: lúc tích ô, thứ nằm trên cùng thường là app vừa dùng
-xong, còn nền desktop luôn phủ kín màn hình nên điểm nào cũng "có cửa sổ".
-
-Tọa độ bám theo cửa sổ: kéo cửa sổ đi chỗ khác thì tọa độ đi theo. Cửa sổ đóng
-thì tọa độ bị tô đỏ và nút Bắt đầu khóa lại.
-
-Bỏ tích thì quay về chuột thật và click **đúng chỗ đã chọn trên màn hình**,
-không bám theo cửa sổ nào.
+- Chọn tọa độ như bình thường, bằng "Chọn bằng chuột", "Ghi hành động" hoặc
+  nhập tay X/Y.
+- Tích "Bật chuột ảo" rồi bấm Bắt đầu.
 
 **Giới hạn, không lách được:**
 
 - App đích phải xử lý chuột theo kiểu message cổ điển. Thứ nào đọc Raw Input
   hoặc DirectInput (đa số game 3D, game có anti-cheat) sẽ bỏ qua hoàn toàn.
-- Cửa sổ bị che hoặc nằm sau thì đọc màu vẫn đúng, vì màu đọc thẳng từ cửa sổ
-  chứ không từ màn hình. Nhưng cửa sổ **thu nhỏ** thì không: phần lớn app không
-  vẽ ra gì khi đã minimize.
-- Không đọc được màu thì app không click, chứ không lùi về đọc màn hình — lúc
-  đó màn hình đang là cửa sổ nằm đè lên, lấy màu app khác rồi click bừa còn tệ
-  hơn đứng im. Cuối lần chạy app báo có bao nhiêu lần như vậy.
+- App nào đòi nút chuột phải được giữ một khoảng thật mới tính là click cũng bỏ
+  qua. Gặp trường hợp đó thì nâng `GIU_NUT` trong `virtual_mouse.py` lên, ví dụ
+  `0.01`. Để `0` là để cửa sổ đích khỏi chiếm chuột thật của người dùng.
+- Cửa sổ đích bị app khác che thì click rơi vào app đang che, đúng như chuột
+  thật. Muốn click trúng thì để cửa sổ đích hở ra.
+- Màu trigger đọc từ màn hình, nên cũng theo đúng thứ đang hiện ở điểm đó.
 
 ## Các file
 
